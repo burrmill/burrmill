@@ -1,0 +1,18 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+# Obtain short instance name from metadata and set as the hostname. The problem
+# is the full DNS name obtained from DHCP is set into kernel as-is, and this
+# sesquipedalian name is printed in logs, taking up half the screen width.
+# Either GCE DHCP sets an incorrect field ID or systemd is doing it wrong, or
+# both. Easier to work around that investigate.
+
+. burrmill_common.inc.sh
+
+n=$(MetadataOrDie instance/name) ||
+    Fatal "Unable to obtain hostname from metadata"
+echo $n >/proc/sys/kernel/hostname
+exit 0

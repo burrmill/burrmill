@@ -1,0 +1,20 @@
+# This file was installed by BurrMill.
+#
+# Run /usr/bin/google_instance_setup if changing.
+#
+# We RYO network management, generally allowing systemd to manage the whole rig.
+# Standard (Debian or GCE) networking setup uses ISC DHCP client, and it can be
+# quite disruptive, dropping and reinstating IP addresses on a hair trigger.
+
+[Daemons]
+ip_forwarding_daemon = false
+network_daemon = false
+
+[InstanceSetup]
+set_host_keys = false
+host_key_types = ed25519
+
+[NetworkInterfaces]
+dhcp_command = /bin/true
+ip_forwarding = false
+setup = false

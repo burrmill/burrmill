@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+/srv      *(ro,fsid=0,sync,all_squash,no_subtree_check)
+/srv/mill *(mp,rw,async,sec=sys,all_squash,anonuid=60004,anongid=60000,no_subtree_check)

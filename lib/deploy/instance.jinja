@@ -1,0 +1,112 @@
+## -*- mode: yaml -*-
+## SPDX-License-Identifier: Apache-2.0
+##  Copyright 2020 Kirill 'kkm' Katsnelson
+##
+##  VM instance template. Instantiated by cluster.jinja.
+##======================================================================##
+{%- set PROJ = env['project']                                           %}
+{%- set CLUS = env['deployment']                                        %}
+{%- set SUBNET = properties['subnet']                                   %}
+{%- set ROLE = properties['role']                                       %}
+{%- set ZONE = properties['zone']                                       %}
+{%- set REGION = '-'.join(ZONE.split('-')[:2])                          %}
+{%- set CNS_DISK = properties['cns_disk']                               %}
+{%- set FILER_DISK = properties['filer_disk']                           %}
+{#-                                                                     #}
+{#-Map role to initial machine type; the default is 'e2-medium'.        #}
+{%- set _role_machine = {'control':'e2-highcpu-2'}                      %}
+{%- set MACHINE_TYPE = _role_machine.get(ROLE, 'e2-medium')             %}
+{#-                                                                     #}
+{#-Map role to account; the default is 'compute'.                       #}
+{%- set _role_account = {'control':'control', 'login':'manage'}         %}
+{%- set ACCOUNT = _role_account.get(ROLE, 'compute')                    %}
+{#-                                                                     #}
+{#-Roles that have permanent boot disks and prevent tearoff on upgrade. #}
+{%- set _role_permboot = {'login':True}                                 %}
+{%- set BOOT = _role_permboot.get(ROLE) or properties['with_boot_disk'] %}
+##======================================================================##
+
+resources:
+
+##=== BOOT DISK (will be torn off and shredded if !BOOT) ===============##
+{%- if BOOT %}
+- name: {{CLUS}}-boot-{{ROLE}}
+  type: compute.v1.disks
+  properties:
+    zone: {{ZONE}}
+    sourceImage: global/images/family/burrmill-compute
+    sizeGb: '10'
+    type: zones/{{ZONE}}/diskTypes/pd-ssd
+    guestOsFeatures:
+    - type: UEFI_COMPATIBLE
+    - type: VIRTIO_SCSI_MULTIQUEUE
+    labels:
+      burrmill: '1'
+      cluster: {{CLUS}}
+      cluster_role: boot-{{ROLE}}
+      disposition: a
+{%- endif %}
+
+##=== VM INSTANCE ======================================================##
+- name: {{CLUS}}-{{ROLE}}
+  type: compute.v1.instance
+  properties:
+    zone: {{ZONE}}
+    machineType: zones/{{ZONE}}/machineTypes/{{MACHINE_TYPE}}
+    shieldedInstanceConfig:
+      enableIntegrityMonitoring: false
+      enableSecureBoot: false
+      enableVtpm: false
+
+    disks:
+
+    ##= THE BOOT DISK ==
+{%- if BOOT %}
+    - deviceName: boot
+      boot: true
+      source: $(ref.{{CLUS}}-boot-{{ROLE}}.selfLink)
+{%- endif %}
+
+    ##= CNS READONLY DISK. Unset during the reattachment DM update. ==
+{%- if CNS_DISK %}
+    - deviceName: cns
+      autoDelete: false
+      source: {{CNS_DISK}}
+      mode: READ_ONLY
+{%- endif %}
+
+    ##= FILER DISK ==
+{%- if ROLE == 'filer' %}
+    - deviceName: filer
+      autoDelete: false
+      source: {{FILER_DISK}}
+{%- endif %}
+
+    networkInterfaces:
+    - network: global/networks/default
+      subnetwork: {{SUBNET}}
+{%- if ROLE == 'login' %}
+      accessConfigs:
+      - type: ONE_TO_ONE_NAT
+{%- endif %}
+
+    tags:
+      items: [ {{CLUS}} ]
+
+    serviceAccounts:
+    - email: bm-c-{{ACCOUNT}}@{{PROJ}}.iam.gserviceaccount.com
+      scopes:
+      - https://www.googleapis.com/auth/cloud-platform
+
+    metadata:
+      items:
+      - { key: cluster, value: {{CLUS}} }
+{%- if ROLE == 'control' and CNS_DISK  %}
+      - { key: cns_disk, value: {{CNS_DISK}} }
+{%- endif %}
+
+    labels:
+      burrmill: '1'
+      cluster: {{CLUS}}
+      cluster_role: {{ROLE}}
+      disposition: p

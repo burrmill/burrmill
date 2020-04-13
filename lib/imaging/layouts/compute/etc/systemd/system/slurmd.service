@@ -1,0 +1,33 @@
+# -*- mode: conf -*-
+# This file was installed by BurrMill.
+
+[Unit]
+Description=Slurm compute node service
+Documentation=man:slurmd(8)
+Wants=munge.service network-online.target
+After=network-online.target
+After=burrmill-environment.target
+
+# Start on compute nodes only.
+ConditionHost=*-node-*
+
+[Service]
+Type=forking
+EnvironmentFile=-/etc/default/slurm
+RuntimeDirectory=slurm
+ExecStartPre=+/usr/local/sbin/slurm_prestart_config slurmd
+ExecStart=/opt/slurm/sbin/slurmd $SLURMD_OPTIONS
+ExecStartPost=/usr/local/sbin/slurm_poststart_config slurmd
+ExecReload=+/usr/local/sbin/slurm_prestart_config slurmd
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/run/slurm/slurmd.pid
+OOMScoreAdjust=-1000
+Nice=-10
+Restart=on-failure
+KillMode=process
+LimitNOFILE=infinity
+LimitMEMLOCK=infinity
+LimitSTACK=infinity
+
+[Install]
+WantedBy=multi-user.target

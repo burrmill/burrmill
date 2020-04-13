@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# Build and package Kalsi in GCB, then drop the tarball into GS.
+# Build time on N1_HIGHCPU_32: under 15 minutes.
+
+substitutions:
+  # Kaldi version and repo to fetch and install from. Kaldi is entirely
+  # unversioned; use (IMPORTANT!) 9 hex digits of a Git commit to specify
+  # desired version. The hash length is important, because this how the hash
+  # is written by the build_kaldi.sh script to become the Version metadatum
+  # of the tarball. These must compare exactly.
+  #
+  # Images for CUDA and MKL should already exist in the project's registry.
+  # The _{MKL,CUDA}_VER here refer to the corresponding image tags.
+  _KALDI_VER:  '6f329a62e'
+  _KALDI_REPO: git://github.com/kaldi-asr/kaldi.git
+  _CUDA_VER:   '10.1.2'
+  _MKL_VER:    '2019.5'
+
+#++ Boilerplate
+  _GS_LOCATION: $_GS_LOCATION
+  _GS_SCRATCH:  $_GS_SCRATCH
+  _GS_SOFTWARE: $_GS_SOFTWARE
+
+logsBucket: $_GS_SCRATCH/cloudbuild/logs
+options:
+  logging: GCS_ONLY
+  env:
+  - _GS_LOCATION=$_GS_LOCATION
+  - _GS_SCRATCH=$_GS_SCRATCH
+  - _GS_SOFTWARE=$_GS_SOFTWARE
+#-- Boilerplate
+  machineType: 'N1_HIGHCPU_32'
+
+tags: [kaldi]
+
+timeout: 1050s
+
+steps:
+- name: gcr.io/cloud-builders/git
+  id: fetch-source
+  entrypoint: /bin/bash
+  args:
+  - -c
+    # 1. This is one long folded YAML line, take care of semicolons.
+    # 2. GitHub server refuses to fetch a commit by its hash, clone whole thing.
+  - set -eux;
+    git clone --single-branch --branch=master --no-checkout $_KALDI_REPO kaldi;
+    git -C kaldi -c advice.detachedHead=false checkout $_KALDI_VER;
+
+  # Prefetch the CUDA image.
+- waitFor: [-]
+  name: gcr.io/cloud-builders/docker
+  id: pull-cuda
+  args: [ pull, -q, '$_GS_LOCATION.gcr.io/$PROJECT_ID/cuda:$_CUDA_VER' ]
+
+  # Prefetch the MKL image.
+- waitFor: [-]
+  name: gcr.io/cloud-builders/docker
+  id: pull-mkl
+  args: [ pull, -q, '$_GS_LOCATION.gcr.io/$PROJECT_ID/mkl:$_MKL_VER' ]
+
+  # Prefetch the cxx builer base image.
+- waitFor: [-]
+  name: gcr.io/cloud-builders/docker
+  id: pull-cxx
+  args: [ pull, -q, '$_GS_LOCATION.gcr.io/$PROJECT_ID/cxx' ]
+
+  # Make a builder with cxx+cuda+mkl.
+- waitFor: [ pull-cuda, pull-cxx, pull-mkl ]
+  name: gcr.io/cloud-builders/docker
+  id: build-builder
+  args:
+  - build
+  - --tag=builder
+  - --build-arg=_CUDA_VER=$_CUDA_VER
+  - --build-arg=_MKL_VER=$_MKL_VER
+  - --build-arg=registry=$_GS_LOCATION.gcr.io/$PROJECT_ID
+  - --file=builder/Dockerfile.cudamkl
+  - builder
+
+  # When both are ready, compile one using the other.
+- waitFor: [ fetch-source, build-builder ]
+  name: builder
+  args: [ ./build_kaldi.sh ]
+
+  # Copy the artifact to the target location. Must use the shell for the
+  # '$(cat GS_METADATA)' expansion. build_kaldi.sh creates that file with the
+  # header switch per line syntax, like:
+  #     -hx-goog-meta-version:6f329a62e
+  #     -hx-goog-meta-source:191208-g6f329a62e
+- name: gcr.io/cloud-builders/gsutil
+  entrypoint: /bin/bash
+  args:
+  - -xc
+  - gsutil -m $(cat GS_METADATA) cp kaldi.tar.gz $_GS_SOFTWARE/tarballs/

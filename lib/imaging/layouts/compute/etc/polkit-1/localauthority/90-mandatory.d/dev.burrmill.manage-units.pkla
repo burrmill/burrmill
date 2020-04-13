@@ -1,0 +1,12 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+[Users can manage systemd units]
+Identity=unix-group:interactive;unix-group:adm
+Action=org.freedesktop.systemd1.manage-unit*;org.freedesktop.systemd1.reload-daemon
+ResultAny=yes
+ResultActive=yes
+ResultInactive=yes

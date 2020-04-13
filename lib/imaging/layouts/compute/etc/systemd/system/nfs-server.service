@@ -1,0 +1,147 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# I had to rewrite this file for NFS4-only setup from the ground up. The Debian
+# package version has ordering bugs in it that cannot be fixed by systemd
+# drop-in. Also, not supporting any NFS v2 or v3 stuff makes it more compact.
+#
+# The VM rolled out from the same compute image becomes a file server if its
+# name matches '*-filer*'. The shared file disk is mounted under /srv/mill in
+# /etc/fstab, but with a noauto flag, so it is not even attempted to mount
+# elsewhere. It is mounted explicitly in /usr/local/sbin/nfsd_prestart_oobe,
+# which also formats an empty disk found under the correct GCE device name,
+# providing a true OOBE-style setup.
+#
+# Unlike the Debian version, the service is not ordered before the
+# remote-fs-pre.target. This makes no sense. Even if we mounted a share from the
+# server machine itself, the mounting program would just wait for the server to
+# start, which is a much weaker dependency.
+#
+# DefaultDependencies=no in Debian config is major issue. The NFS server uses an
+# ungodly amount of RAM for caching; it must shutdown cleanly by flushing disks,
+# and the lack of conflct with the shutdown.target puts the system into a
+# dangerous race on system shutdown. This setting coupled with the lack of
+# 'Conflicts=shutdown.target' may lead to, well, interesting results. I hope the
+# kernel-only nfsd is careful to flush everything on shutdown, but I would not
+# bet my life on this. Also, the package has the dependency on services that
+# BindTo it reversed, which renders that dependency useless, and pulls the
+# network.target and adds an After= dependency on it, which is a passive target
+# protocol violation.
+#
+# NFS SERVER PERFORMANCE
+# ======================
+#
+# Tuning of the number of threads is an interesting point. The combination of
+# the large number of nfsd threads and the high egress rate (32 Gbps is a very
+# high figure) may leads to memory exhaustion; increasing the vm.min_free_kbytes
+# is vitally important[1]; I observed nfsd failing atomic allocations under
+# load, which affects performance significantly. If you see that the clients
+# negotiate smaller request size than the maximum on mount, increase server
+# RAM. I should have optimized the net.core.netdev_max_backlog parameter[1], but
+# that's in the works. Both parameters are discussed very briefly in the
+# op. cit. Linux NFS implementation is very underdocumented, and all knowledge
+# is arcane; hidden gems are usually found in various conference proceedings
+# dedicated to HPC, which are widely known in very narrow circles researchers
+# (myself most certainly excluded).
+#
+# Note to myself, maybe 200 NFS threads is an overkill on a smaller RAM machine.
+# Make it dynamic based on 'cat /proc/meminfo' report?
+#
+# [1] D. Hildebrand, P. Andrews, et. al. "Deploying pNFS across the WAN: First
+# Steps in HPC Grid Computing," in *Proc. of the 9th LCI International Conf.\
+# on High-Performance Clustered Computing*, Urbana, IL, Apr 2008.
+
+[Unit]
+Description=Burrmill NFSv4 file server
+
+After=network.target burrmill-environment.target
+ConditionHost=*-filer*
+
+# This mounts the /proc/fs/nfsd control filesystem.
+Requires=proc-fs-nfsd.mount
+After=proc-fs-nfsd.mount
+
+# The nfs-config.service is just a messy script, apparently a half-baked
+# attempted to translate a SysV script to systemd. It creates a combined
+# EnvironmentFile for all NFS services in /run/sysconfig/nfs-utils, but the
+# NEED_* settings, for one, are simply ignored. This better be Required,
+# otherwise, if the thing is unavailable for any reason, the variable
+# $RPCNFSDARGS would be undefined, and the server will be silently run with no
+# arguments and start a single thread by default, and good luck tracking down
+# this problem. We also check if the variable was in fact set before starting
+# the service, and refuse to start if it is not.
+Requires=nfs-config.service
+After=nfs-config.service
+
+# Dependencies of NFSv4. They BindTo this service, but incorrectly: the system
+# manual says that the "strong bind" dependency, preventing them from starting
+# if the bound unit fails, is to use After= in addition to BindsTo=. Otherwise,
+# the services end up in a weird state: they will start even if the main server
+# (this unit) fails. The Before clause below is the fix: a Before clause on this
+# service equals After on the others (which is missing), so this issue can be
+# fixed right here, without drop-ins for these files.
+Requires=nfs-idmapd.service nfs-mountd.service
+Before=nfs-idmapd.service nfs-mountd.service
+
+# GSS services dependencies and ordering. We're not using Kerb. I'm leaving
+# these in, just in case someone wants to build a Kerberized NFS4 based on
+# this. The auth-rpcgss-module.service startup and services it pulls are
+# conditioned on the presense of the Kerb keytab file in /etc, so they are
+# skipped in our setup anyway. The only caveat is examine them carefully: 3 unit
+# files involved in our setup had dependency errors, some serious, some less so,
+# but still I would not trust the other unit files blindly, and I have not tried
+# to run them.
+Wants=auth-rpcgss-module.service
+After=rpc-gssd.service gssproxy.service rpc-svcgssd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/run/sysconfig/nfs-utils
+
+# Provide OOBE-style self-initialization: find the disk attached as the device
+# named 'filer', and mount it if it has a filesystem on it, or create an ext4
+# filesystem with correct parameters and then mount it, if not.
+ExecStartPre=/usr/local/sbin/nfsd_prestart_oobe
+
+# The Debian package does not create all necessary directories, resulting in
+# nfsdcltrack errors on every boot. The nfsdcltrack call-out userspace program
+# logs two errors about a missing table in its database on the very first run;
+# this is expected. It creates the database, so this happens only once.
+ExecStartPre=/bin/mkdir -p /var/lib/nfs/nfsdcltrack
+
+# This stanza is very important, as the kernel file cache takes all RAM there
+# is, to the point ntfsd fails atomic allocations.
+#
+# Do monitor system log for page alloc failures, and increase this if needed:
+#
+#    kernel: nfsd: page allocation failure: order:0, mode:0x480020(GFP_ATOMIC)
+#
+# The default value depends on total RAM; for 30 to 640G I've observed 67584,
+# which is not enough. If you see the messages like these, increase this value.
+# Read the last paragraph in the introduction to this file.
+ExecStartPre=+/bin/sh -c "echo 135168 > /proc/sys/vm/min_free_kbytes"
+
+# Using ExecStart for the test, not ExecStartPre; for a oneshot service there is
+# little difference. Othersise, because of dependencies starting, the error
+# message in the log would be 20 lines or so back from the end. This way it just
+# stands out better.
+ExecStart=@/bin/sh %n -c '[ -n "$RPCNFSDARGS" ] && exit; echo >&2 \
+  "<2>%n: fatal: Configuration variable RPCNFSDARGS is not set."; exit 1'
+ExecStart=/usr/sbin/rpc.nfsd $RPCNFSDARGS
+
+ExecStartPost=/usr/sbin/exportfs -r
+ExecStartPost=/usr/local/sbin/nfsd_poststart
+
+ExecStop=/usr/sbin/rpc.nfsd 0
+
+ExecReload=/usr/sbin/exportfs -r
+
+ExecStopPost=/usr/sbin/exportfs -au
+ExecStopPost=/usr/sbin/exportfs -f
+
+[Install]
+WantedBy=multi-user.target

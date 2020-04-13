@@ -1,0 +1,55 @@
+# -*- mode: yaml -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# The template is designed to be instantiated by the bm-deploy management tool,
+# and then updated by other tools that are rolling out updates. Manual command
+# line updates would be complicated, and are recommended against.
+
+info:
+  title: BurrMill cluster
+  version: 0.5
+
+imports:
+- path: cluster.jinja
+- path: instance.jinja
+
+required:
+- cns_disk
+- ip_range
+- zone
+
+properties:
+  zone:
+    description: GCE deployment zone, e.g. 'us-west1-b'.
+    type: string
+  ip_range:
+    description: IP CIDR range for cluster subnet, e.g. '10.113.16.0/22'.
+    type: string
+  cns_disk:
+    description: >-
+      CNS disk and snapshot name, e.g. 'burrmill-cns-v005-200128'. A matching
+      snapshot must exist, even if the disk has been already resurrected.
+    anyOf:
+    - type: string
+    - type: 'null'
+  filer_size:
+    description: >-
+      Filer disk size in GB. Default is 750, the smallest practical.
+      The disk can be extended later (bypassing the DM; it gets angry if asked
+      to enlarge a disk), but can never be reduced later.
+    type: integer
+    default: 750
+  backup:
+    description: >-
+      Enable 8 last semiweekly backups of the filer disk. Default is false.
+      This is complicated, read the documentation if you want that.
+    type: boolean
+    default: NO
+  with_boot_disk:
+    description: >-
+      Set to false transiently during boot disk image rollout only in order
+      to tear off and shred old boot disks, then flipped back to true again
+      to re-create a boot disk from a newer, the latest image in the family.
+    type: boolean
+    default: YES

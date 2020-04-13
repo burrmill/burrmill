@@ -1,0 +1,12 @@
+# -*- mode: conf -*-
+# This file was installed by BurrMill.
+#
+# Just in case net.ifnames=0 is not in the kernel command line.
+
+[Match]
+Driver=virtio_net
+
+[Link]
+MACAddressPolicy=none
+NamePolicy=kernel keep
+AutoNegotiation=no

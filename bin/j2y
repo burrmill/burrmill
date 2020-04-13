@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+# -*- python-indent-offset: 2; -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+import argparse as ap, json, os.path, sys
+
+ME = os.path.basename(sys.argv[0])
+
+try:
+  import yaml
+except ImportError:
+  exit(f"{ME}:fatal:PyYAML is missing. Do 'apt install python3-yaml' "
+        "or 'pip3 install PyYAML=3.13'")
+
+
+# Scope the argparser under carpet, we need it once.
+def _parse_args() -> ap.Namespace:
+  p = ap.ArgumentParser(description='Convert JSON to YAML.',
+                        epilog=('Combining small --width=N with --compact '
+                                'yields less compact output. Avoid.'))
+  a = p.add_argument
+  a('infile', metavar=' FILE | - ', nargs='?',
+    help="Input filename. Omit or pass '-' for stdin.")
+  a('--width', '-w', metavar='N', type=int, default=None,
+    help='try to limit wrappable output lines to N columns.')
+  a('--indent', '-d', metavar='N', type=int, default=2,
+    help='indent output this many spaces. Default indent is 2.')
+  # PyYAML.default_flow_style is a 3-state setting: True for flow style (the
+  # most compact; False for fully columnar everything; None for flow arrays
+  # but columnar objects. Our default is False because of 'store_true' on -c.
+  g = p.add_mutually_exclusive_group()
+  a = g.add_argument
+  a('--compact', '-c', dest='default_flow_style', action='store_true',
+    help='most compact, flow-style output. -d has no effect.')
+  a('--flow','-l', dest='default_flow_style', action='store_const', const=None,
+    help='output arrays only in flow style. Default is columnar.')
+
+  o = p.parse_args()
+  if o.infile == '-': o.infile = None
+  return o
+
+
+def _main() -> int:
+  nsargs = _parse_args()
+  kwargs = vars(nsargs)
+  infile = kwargs.pop('infile')  # Or else safe_dump will be angry at you.
+
+  try:
+    with (infile and open(infile) or sys.stdin) as ifd:
+      yaml.safe_dump(json.load(ifd), sys.stdout, allow_unicode=True, **kwargs)
+  # Except that the BrokenPipeError is broken in 3.7. This won't catch it.
+  except BrokenPipeError: pass
+  return 0
+
+
+if __name__ == '__main__':
+  # Don't puke stack trace on ctrl+C.
+  import signal as sig
+  sig.signal(sig.SIGINT, sig.SIG_DFL)
+
+  try:
+    exit(_main())
+  except Exception as e:
+    # Save the innocent uninitiated from the Zen of backtrace.
+    exit(f"{ME}:fatal: {type(e).__name__}: {e}")

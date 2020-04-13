@@ -1,0 +1,15 @@
+# -*- mode: sh -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+# NFSv4 server configuration.
+NEED_SVCGSSD=no
+RPCMOUNTDOPTS="--manage-gids -N 2 -N 3"
+RPCNFSDOPTS="--lease-time=15 --grace-time=15 -N 2 -N 3"
+RPCNFSDPRIORITY=0
+
+# The number of ntfsd threads is tunable, although unlikely needs to change. The
+# number of 200 worked good enough for large Kaldi jobs, but YMMV still.
+RPCNFSDCOUNT=200

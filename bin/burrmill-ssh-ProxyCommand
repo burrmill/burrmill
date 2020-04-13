@@ -1,0 +1,73 @@
+#!/bin/bash
+
+set -u
+
+(($# < 2)) && { cat; exit 2; } <<EOF
+Usage: put this command (with full path) to the .ssh/config section that
+deals with your clusters (matching all of them), an follows:
+
+    Host q?-* w?-*
+      ProxyCommand burrmill-ssh-ProxyCommand [ -v ] %h %p
+
+In this example, the command is user for all host names matching the host
+name, such as xw-login, xc-login etc. (w=west, c=central, and q and x are the
+two least frequent word-starting letter in English). This is the way I name
+*my* clusters; yours can be anything, but stay consistent to ease ssh config.
+
+Recall from ssh_config manual that the first matching clause wins. Once the
+clause like above selected an unintended host 'c3-po', ProxyCommand is set,
+period.
+
+The workhorse 'gcloud compute start-iap-tunnel %h %p --listen-on-stdin' (this
+form is undocumented) uses the zone passed in the --zone switch, or, absent
+the switch, the default set in config. What we do here is attempt to match the
+host name to cluster and extract that cluster's zone, kept as a plain text
+variable specifically for use of this script.
+
+An supported extension to host format is <host>+<zone>. You may be prompted
+to use this form if there are multiple machines not belonging to a cluster,
+with the same name, but in different zones.
+
+By default, the command only prints warning and errors. -v also prints bash
+execution trace to stderr to diagnose connection or machine location issues.
+EOF
+
+[[ $1 == -v ]] && { debug=y; shift; }
+host=$1 port=${2?} zone= cluster=
+
+my0=${0##*/}
+
+# Should we support the full host URL?
+
+[[ ${debug-} ]] && set -x
+case $host in
+  *+*+*) ;;  # Ignore pathological case, let it fall through and fail.
+  *?+?*) zone=${host#*+} host=${host%+*} ;;
+  *?-?*) cluster=${host%%-*} ;;
+esac
+
+# Try to obtain cluster zone from a deployment record first. "cluster" is
+# tentative here, just anything before a '-' goes; it does not mean that a
+# deployed cluster exists with that name.
+[[ $cluster && ! $zone ]] &&
+  zone=$(gcloud beta runtime-config configs variables get-value zone \
+                --verbosity=none --config-name=runtimeconfig-${cluster})
+
+# If no zone provided with +<zone>, and no cluster found, find by name.
+if [[ ! $zone ]]; then
+  zone=( $(gcloud compute instances list \
+                  --filter=name=$host --format='value(zone)') )
+  # If found 0 or 1 proceed to exec (to fail if found none, likely).
+  # Otherwise, print all possible short names <host>+<zone> and exit.
+  if (( ${#zone[@]} > 1 )); then
+    echo >&2 "$my0: There is more than one VM named '$host'
+in the project. Use one of the following qualified names instead:"
+    for z in ${zone[@]}; do
+      echo >&2 "    $host+$z"
+    done
+    exit 1
+  fi
+fi
+
+exec gcloud compute start-iap-tunnel \
+       ${zone+--zone=$zone} $host $port --listen-on-stdin

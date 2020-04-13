@@ -1,0 +1,30 @@
+$include /etc/inputrc
+
+# Some emulators report xterm but send rxvt keys.
+"\eOC": forward-word
+"\eOD": backward-word
+
+# PgUp/PgDn search history by prefix.
+"\e[5~": history-search-backward
+"\e[6~": history-search-forward
+
+# Highlight common prefix in completion list?
+set colored-completion-prefix on
+
+# Colorize completions with LS_COLORS?
+#set colored-stats on
+
+# Ring the bell if next completion character is ambiguous?
+set bell-style none
+
+# Show completions if next character is ambiguous?
+set show-all-if-unmodified on
+
+# Show all completions always if there is more that one?
+set show-all-if-ambiguous off
+
+# Add stat/ls-style suffix character to filenames in completion list?
+#set visible-stats on
+
+# Complete symlinked directories with the slash?
+set mark-symlinked-directories on

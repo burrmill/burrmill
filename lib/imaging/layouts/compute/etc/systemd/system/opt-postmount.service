@@ -1,0 +1,33 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# Update systemd environment and ldconfig cache after /opt has been mounted.
+# Type=oneshot makes a systemd startup job wait for script completion. Since the
+# state of systemd is updated by the invoked script, it's better wait for its
+# completion.
+
+[Unit]
+Description=Update environment and ld.so cache upon /opt mount
+Before=basic.target
+BindsTo=opt.mount
+After=opt.mount
+
+# The service is a provider of BurrMill environment.
+Wants=burrmill-environment.target
+Before=burrmill-environment.target
+
+DefaultDependencies=no
+RefuseManualStart=true
+RefuseManualStop=true
+
+[Service]
+ExecStart=/usr/local/sbin/opt_postmount
+ExecReload=/usr/local/sbin/opt_postmount
+Type=oneshot
+RemainAfterExit=true
+
+[Install]
+WantedBy=opt.mount

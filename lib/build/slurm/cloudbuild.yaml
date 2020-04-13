@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# Build and package Slurm in GCB, then drop the tarball into GS.
+# Build time under 5 minutes.
+
+substitutions:
+  # Slurm version to fetch and install. Repo unikely need to change ever.
+  _SLURM_VER:  '19.05.4-1'
+  _SLURM_REPO: git://github.com/SchedMD/slurm.git
+
+#++ Boilerplate
+  _GS_LOCATION: $_GS_LOCATION
+  _GS_SCRATCH:  $_GS_SCRATCH
+  _GS_SOFTWARE: $_GS_SOFTWARE
+
+logsBucket: $_GS_SCRATCH/cloudbuild/logs
+options:
+  logging: GCS_ONLY
+  env:
+  - _GS_LOCATION=$_GS_LOCATION
+  - _GS_SCRATCH=$_GS_SCRATCH
+  - _GS_SOFTWARE=$_GS_SOFTWARE
+#-- Boilerplate
+
+tags: [slurm]
+
+steps:
+  # Here we need a bit of bash's help: ver. 19.05.4-1 => tag slurm-19-05-4-1
+- name: gcr.io/cloud-builders/git
+  id: fetch-source
+  entrypoint: /bin/bash
+  args:
+  - -c
+    # 1. This is one long folded YAML line, take care of semicolons.
+    # 2. GCB substututes a literal in tag=..., so we need the 2nd expansion.
+  - set -eux;
+    tag=$_SLURM_VER;
+    tag=slurm-${tag//./-};
+    git -c advice.detachedHead=false clone --depth=1 --branch=$tag $_SLURM_REPO
+
+  # Prefetch the cxx builder at the same time. [-] = start on build's start.
+- waitFor: [-]
+  name: gcr.io/cloud-builders/docker
+  id: prefetch-cxx
+  args:
+  - pull
+  - --quiet
+  - $_GS_LOCATION.gcr.io/$PROJECT_ID/cxx
+
+  # When both arrive, compile one using the other.
+- waitFor: [ fetch-source, prefetch-cxx ]
+  name: $_GS_LOCATION.gcr.io/$PROJECT_ID/cxx
+  args: [ ./build_slurm.sh ]
+
+  # Drop the artifact. Use shell for the '$(cat GS_METADATA)' expansion.
+  # build_slurm.sh drops that file with the '-h'<header> per line, like
+  #   -hx-goog-meta-version:19.05.4-1
+  #   -hx-goog-meta-source:191114-ge3f7d35a1
+- name: gcr.io/cloud-builders/gsutil
+  entrypoint: /bin/bash
+  args:
+  - -xc
+  - gsutil -m $(cat GS_METADATA) cp slurm.tar.gz $_GS_SOFTWARE/tarballs/

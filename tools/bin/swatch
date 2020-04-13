@@ -1,0 +1,2 @@
+#!/bin/bash
+watch -d -n2 'echo; sinfo; echo; squeue'

@@ -1,0 +1,36 @@
+# This file was installed by BurrMill.
+#
+# Quite insecure but convenient Sudo setup.
+
+# Do not lecture anyone here, please.
+Defaults lecture = never
+
+# Keep $HOME unchanged (a compile-time default for most but not all distros).
+# Use 'sudo -H' to override.
+Defaults env_keep += HOME, !set_home
+
+# A list often used convenience environment variables, quite unrestrictive.
+Defaults env_keep += "*_COLORS EDITOR GIT_PS1_* LESS MANPATH MANOPT MANWIDTH"
+Defaults env_keep += "MILIEU SYSTEMD_PAGER TIME_STYLE VISUAL"
+
+# Propagate SSH agent socket, and information variables.
+Defaults env_keep += "SSH_AUTH_SOCK SSH_CONNECTION"
+
+# Slurm environment variables for information commands.
+Defaults env_keep += "SLURM_* SCONTROL_* SINFO_* SQUEUE_*"
+
+# Just 'sudo' for root prompt.
+Defaults shell_noargs
+
+# Trust user's PATH.
+Defaults !secure_path
+
+# No mail.
+Defaults !mail_badpass, !mail_no_user, mailerpath = /bin/true
+
+# And no logging, too.
+Defaults !logfile, !syslog
+
+# Do not use pam sessions; they do their own logging, which is useless. Use a
+# pty, however, so that sudo would not leave backgrounded jobs behind.
+Defaults !pam_session, use_pty

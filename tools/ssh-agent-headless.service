@@ -1,0 +1,155 @@
+# -*- mode: conf-unix; -*-
+# SPDX-License-Identifier: Unlicense OR CC0-1.0 OR Apache-2.0 OR WTFPL
+# ~/.config/systemd/user/ssh-agent-headless.service
+#
+# Written by Kirill 'kkm' Katsnelson in 2018 and dedicated to public domain. If
+# public domain is not recognized in your jurisdiction, use any of the licenses
+# listed above that suit you the best.
+#
+# This is a per-user service to run ssh-agent(1) under a systemd user's service,
+# shared by all sessions of this user. Many distros come with a service
+# providing a similar functionality for sharing ssh-agent on a single desktop,
+# but these are started in graphical-session-pre.target. Multiple ssh sessions
+# into a headless server do not have the sharing advantage; also, if you are
+# booting a headless machine into multi-user.target, the graphical target is
+# never pulled, and its wanted services aren't started. We rather bind to the
+# default.target (which is an alias for either graphical-session-pre.target or
+# multi-user.target), so that ssh-agent is active as long as the user's service
+# scope is.
+#
+# The 'headless' in file name should not mislead you: our belief is that our
+# approach is better than the often used one for machines running both X
+# sessions and remote ssh logins; read the ADDITIONAL NOTES section below.
+#
+# Be aware that some programs, such as tmux, may escape from under systemd's
+# control, and thus won't prevent the last logoff from stopping this service.
+#
+# INSTALLATION
+# ------------
+#
+# Drop this file in one of systemd user unit directories (man systemd.unit; most
+# often `~/.config/systemd/user/`, but check with your manual if systemd was
+# compiled using the default location). Then notify the user's systemd instance
+# about the change and then enable and start the new service with commands (as
+# your identity, NOT sudo root!):
+#
+#    systemctl --user daemon-reload
+#    systemctl --user enable --now ssh-agent-headless
+#
+# To drop all keys from the shared agent, simply restart the service any time:
+#
+#    systemctl --user restart ssh-agent-headless
+#
+# To uninstall:
+#
+#    systemctl --user disable --now ssh-agent-headless
+#    (then delete the file)
+#
+# Unfortunately, there is no mechanism in systemd (yet?) to apply environment
+# variables from user's systemd to a new session (the things listed by `loginctl
+# list-sessions`); pam_systemd(8) only sets a few hardcoded ones. One way to
+# establish the environment variable SSH_AUTH_SOCK in every login shell (or
+# every interactive shell) is to source it in your .bash_profile (or .bashrc)
+# using bash-specific process substitution:
+#
+#    . <(systemctl --user show-environment | grep ^SSH_AUTH_SOCK= &&
+#          echo export SSH_AUTH_SOCK)
+#
+# If you are using a shell that do not have the feature, implement the same
+# idea in it. This may not be required if you have dbus-daemon(1), so you may
+# opt not to use this workaround. It is not harmful in any case.
+#
+# TROUBLESHOOTING
+# ---------------
+#
+# `systemctl --user status`: see if this service is in the tree. Will also
+#     show whether or not you have dbus.service running.
+# `systemctl --user status ssh-agent-headless`: should be listed as "Active".
+#     This command displays the user's journal snippet from the last start or
+#     an attempt to start.
+#
+# If something is not working: add `-x` or `-xv` to bash command lines and try
+# again. The above status command will display much more detailed information
+# from the shell. Don't forget `systemctl --user daemon-reload` after any
+# modification is done to this file!
+#
+# Mask gpg-agent-ssh.socket: you are most likely *started* searching for this
+# solution because gpg agent emulation was insufficient (that was my impetus
+# for writing this service): `systemctl --user mask gpg-agent-ssh.socket`
+#
+# ADDITIONAL NOTES
+# ----------------
+#
+# This service conditionally starts only if the directory ~/.ssh exists, and
+# will probably royally fail if ~/.ssh/sockets exists but is not a directory or
+# a symlink. We overwrite the link if and only if it points to a non-existing
+# target. If ~/.ssh/sockets is a directory or a link pointing to an existing
+# directory, the socket is created inside it. If it's a dead symlink, then we
+# create a symlink ~/.ssh/sockets -> $XDG_RUNTIME_DIR/ssh-agent/.
+# $XDG_RUNTIME_DIR is normally mounted on a tmpfs in-memory filesystem, so the
+# socket disappears even if the system has not been shutdown properly.
+#
+# If using a graphical desktop, then mask the ssh-agent.service that may have
+# shipped with your distro (`systemctl --user mask ssh-agent.service`). Most
+# systemd-managed systems have it under this exact name, or try finding it with
+# `systemctl --user | grep ssh` then check the status using `systemctl --user
+# status <found-service-name>`. Our approach has an advantage such that the
+# agent is shared between both remote ssh and local X sessions.
+#
+# The commands are executed with bash, and assume the hardcoded path /bin/bash.
+# If you do not have bash, you may need to tweak the commands in this file. I am
+# so used to it that there likely are some bashisms even in the one-liners here.
+
+[Unit]
+Description=OpenSSH Agent independent of X desktop
+Documentation=man:ssh-agent(1)
+Conflicts=ssh-agent.service gpg-agent-ssh.socket
+ConditionPathIsDirectory=%h/.ssh
+
+[Service]
+Restart=on-failure
+
+# Keep in mind that the service is started and stopped per user's service
+# instance, the things you can list with the 'loginctl list-users' command, or
+# see as a service named user@UID.service (e. g., user@1004.service) in the
+# `systemd --user status` output. This session service is shared by all logins
+# of the same user, is started upon the first login of the user and stopped when
+# the last user's connection logs off, be it local tty, remote ssh session or an
+# X desktop session.
+
+# Before start: if there is a link ~/.ssh/sockets pointing nowhere, overwrite it
+# to point to $XDG_RUNTIME_DIR/ssh-agent/ and create that directory. The
+# backslashes here are interpreted by systemd, and bash sees a single unbroken
+# line; do not forget the semicolons. Also, `$$` is a required systemd's escape;
+# bash sees a single `$`.
+ExecStartPre=-/bin/bash -c 's="%h/.ssh/sockets" d="%t/ssh-agent";\
+  [[ -L $$s || ! -e $$p ]] && ln -sfT "$$d" "$$s" && mkdir -p "$$d"; exit 0'
+
+# ExecStart (as well as other Exec* options of systemd) require a full path to
+# the executable. A transient shell below is only used to find the ssh-agent
+# executable on the PATH.
+ExecStart=/bin/bash -c 'exec >/dev/null ssh-agent -D -a "%h/.ssh/sockets/S.agent"'
+
+# After successful start: Either ask dbus-update-activation-environment(1) to
+# augment the environment in both dbus user daemon and systemd; fallback to
+# systemd alone if that fails.  If you have a headless machine, dbus activation
+# environment may not be used or even installed, and the command itself may be
+# missing from the system.
+ExecStartPost=-/bin/bash -c 's="%h/.ssh/sockets/S.agent";\
+  dbus-update-activation-environment 2>/dev/null --systemd SSH_AUTH_SOCK="$$s"\
+    || systemctl --user set-environment SSH_AUTH_SOCK="$$s"; exit 0'
+
+# After either service stop, or an unsuccessful start attempt: Delete the
+# runtime ssh-agent directory and then remove the link ~/.ssh/sockets if and
+# only if it is a symlink pointing nowhere (a reverse of ExecStartPre, where the
+# link is overwritten under same condition). Then unset the environment variable
+# SSH_AUTH_SOCK in both the dbus daemon (if present) and user's systemd. We do
+# this in two separate commands, because dbus-update-activation-environment
+# cannot undefine a variable, only set it to an empty string.
+ExecStopPost=-/bin/bash -c 's="%h/.ssh/sockets" d="%t/ssh-agent";\
+  rm -rf "$$d"; [[ -L $$s && ! -e $$s ]] && rm -f "$$s";\
+  dbus-update-activation-environment 2>/dev/null --systemd SSH_AUTH_SOCK=;\
+  systemctl --user unset-environment SSH_AUTH_SOCK; exit 0'
+
+[Install]
+WantedBy=default.target

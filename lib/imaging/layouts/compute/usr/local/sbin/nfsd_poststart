@@ -1,0 +1,14 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+set -u
+
+. burrmill_common.inc.sh
+
+# Report the successful completion of startup sequence to the world.
+GetSetMetadata instance/guest-attributes/oobe-service-ping/nfsd READY
+
+exit 0

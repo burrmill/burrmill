@@ -1,0 +1,119 @@
+## -*- mode: yaml -*-
+## SPDX-License-Identifier: Apache-2.0
+## Copyright 2020 Kirill 'kkm' Katsnelson
+##
+##  Top-level cluster deployment template.
+##======================================================================##
+{%- set CLUS = env['deployment']                                        %}
+{%- set ZONE = properties['zone']                                       %}
+{%- set REGION = '-'.join(ZONE.split('-')[:2])                          %}
+{%- set IP_RANGE = properties['ip_range']                               %}
+{%- set FILER_SIZE = properties.get('filer_size') or 750                %}
+{%- set CNS_DISK = properties['cns_disk']                               %}
+{%- set BACKUP = properties.get('backup')                               %}
+{%- set WITH_BOOT_DISK = properties.get('with_boot_disk')               %}
+##======================================================================##
+
+resources:
+
+##=== RUNTIME CONFIG ===================================================##
+- name: runtimeconfig-{{CLUS}}
+  type: runtimeconfig.v1beta1.config
+  properties:
+    config: runtimeconfig-{{CLUS}}
+    description: Runtime configuration for cluster {{CLUS}}
+
+##=== SUBNET ===========================================================##
+- name: cluster-{{CLUS}}
+  type: compute.v1.subnetworks
+  properties:
+    region: {{REGION}}
+    network: global/networks/default
+    ipCidrRange: {{IP_RANGE}}
+    privateIpGoogleAccess: true
+
+##=== FIREWALL =========================================================##
+- name: burrmill-{{CLUS}}-intranet
+  type: compute.v1.firewalls
+  properties:
+    network: global/networks/default
+    priority: 10000
+    allowed:
+    - IPProtocol: all
+    sourceTags: [ {{CLUS}} ]
+    targetTags: [ {{CLUS}} ]
+
+##=== SNAPSHOT, twice a week, optional. ================================##
+{%- if BACKUP  %}
+- name: burrmill-snapshot-semiweekly
+  type: compute.v1.resourcePolicies
+  properties:
+    region: {{REGION}}
+    snapshotSchedulePolicy:
+      retentionPolicy:
+        maxRetentionDays: 28
+        onSourceDiskDelete: APPLY_RETENTION_POLICY
+      schedule:
+        weeklySchedule:
+          dayOfWeeks:
+          - day: SUNDAY
+            startTime: '00:00'
+          - day: WEDNESDAY
+            startTime: '12:00'
+      snapshotProperties:
+        labels:
+          burrmill: '1'
+        storageLocations:
+        - {{REGION}}
+{%- endif %}
+
+##=== FILER DISK, make new or adopt existing. ==========================##
+- name: {{CLUS}}-shared-nfs-disk
+  type: compute.v1.disks
+  properties:
+    zone: {{ZONE}}
+    sizeGb: '{{FILER_SIZE}}'
+{%- if BACKUP  %}
+    resourcePolicies: [ $(ref.burrmill-snapshot-semiweekly.selfLink) ]
+{%- endif %}
+    labels:
+      burrmill: '1'
+      cluster: {{CLUS}}
+      disklabel: burrmill_filer
+      disposition: p
+
+
+##=== CNS DISK, resurrect or adopt existing ============================##
+{%- if CNS_DISK %}  {# False-y during the rolling out of a new disk. #}
+## Locate source snapshot via the gcp-types API, to copy its labels to the
+## CNS disk. The labels describe software versions, so are important.
+- name: cns-source-snapshot
+  action: gcp-types/compute-v1:compute.snapshots.get
+  properties:
+    snapshot: {{CNS_DISK}}
+
+## The CNS disk itself.
+- name: {{CNS_DISK}}
+  type: compute.v1.disks
+  properties:
+    zone: {{ZONE}}
+    sourceSnapshot: $(ref.cns-source-snapshot.selfLink)
+    type: zones/{{ZONE}}/diskTypes/pd-ssd
+    labels:
+      $(ref.cns-source-snapshot.labels)
+{%- endif %}
+
+##=== INSTANCES ========================================================##
+{%- for role in ['login', 'control', 'filer'] %}
+- name: {{CLUS}}-{{role}}
+  type: instance.jinja
+  properties:
+    role: {{role}}
+    zone: {{ZONE}}
+    subnet: $(ref.cluster-{{CLUS}}.selfLink)
+    with_boot_disk: {{WITH_BOOT_DISK}}
+    filer_disk: $(ref.{{CLUS}}-shared-nfs-disk.selfLink)
+{%- if CNS_DISK %}
+    cns_disk: $(ref.{{CNS_DISK}}.selfLink)
+{%- endif %}
+{%- endfor %}

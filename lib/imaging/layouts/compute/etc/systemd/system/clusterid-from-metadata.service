@@ -1,0 +1,30 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# Add cluster identity variables to systemd system unit environment from
+# metadata. This is needed on nodes to find the filer to mount, for one.
+# Everything past this point can rely on all required environment present
+# In systemd environment passed to every unit.
+
+# TODO(kkm): How to handle a failure here? Without successfull identity,
+#            nothing is going to work. We need an alert reporting to
+#            stackdriver.
+
+[Unit]
+Description=Establish BurrMill Cluster Identity from Metadata
+After=network.target
+
+# The service is a provider of BurrMill environment.
+Wants=burrmill-environment.target
+Before=burrmill-environment.target
+
+[Service]
+ExecStart=/usr/local/sbin/clusterid_from_metadata
+Type=oneshot
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

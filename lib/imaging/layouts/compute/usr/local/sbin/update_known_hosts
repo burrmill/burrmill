@@ -1,0 +1,13 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+# Accept the server key from anywhere anywhere on our net.
+# See also ./etc/ssh_config and ./usr/local/sbin/is_host_in_cluster which set
+# host key alias to 'burrmill_all_hosts' if the host is in cluster.
+{  printf 'burrmill_all_hosts '
+   cat /etc/ssh/ssh_host_ed25519_key.pub; } > /etc/ssh/ssh_known_hosts
+
+chmod 644 /etc/ssh/ssh_known_hosts

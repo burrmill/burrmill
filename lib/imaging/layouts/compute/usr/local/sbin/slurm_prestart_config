@@ -1,0 +1,69 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# This program is invoked with the root user identity just before slurmd or
+# slurmctld startup. Extract common Slurm configuration files and install
+# them into the /etc/slurm directory. This may be invoked as a stand-alone
+# service, or as part of Slurm daemon startup. In either case, we redirect
+# errors to systemd journal.
+
+set -uo pipefail
+
+. slurm_common.inc.sh
+
+readonly confdir=/etc/slurm
+readonly SYSTEMD_EX_CONFIG=78  # "Configuration error", see systemd.exec(5).
+
+# Redirect stderr such that any message is reported as an alert to journald by
+# prepending <2> to it. Use fd4 (saved stderr) to directly report other severity
+# codes.
+exec 4>&2 2> >(while read -r; do printf >&4 '<2> %s\n' "$REPLY"; done)
+# Systemd can kill the logging subshell swiftly, close explicitly before exiting
+trap 'exec >&2-' EXIT
+
+# Save config, if exists, in the slurm.bak directory. We won't try to reuse
+# this config, but it's sensible if debugging is required.
+if [[ -d $confdir ]]; then
+  rm -rf ${confdir}.bak
+  mv $confdir ${confdir}.bak
+  echo "Previous config saved by $0 on $(date -Is)" \
+       > ${confdir}.bak/.readme
+fi
+
+# We could do without, and get the value from metadata, but this is a major
+# config problem, so better debug.
+if [[ ! ${BURRMILL_CLUSTER-} ]]; then
+  echo >&2 "Systemd system environment variable BURRMILL_CLUSTER is not set"
+  exit $SYSTEMD_EX_CONFIG
+fi
+
+datum=$(MetadataOrDie project/attributes/${BURRMILL_CLUSTER}_slurm_config)
+if [[ ! $datum ]]; then
+  echo >&2 "Project metadatum '${BURRMILL_CLUSTER}_slurm_config' is missing"
+  exit $SYSTEMD_EX_CONFIG
+fi
+
+# Create Slurm config directory.
+mkdir -p --mode=755 $confdir
+
+# The first '#'-comment is special if present: it marks Git source commit.
+commit_id=$(head -n1 <<<"$datum" | awk '/^#/ {print $2}')
+[[ $commit_id ]] && echo $commit_id > $confdir/.commit_id
+
+# Extract encoded archive. Exit code is that of the pipeline. Grep exit code is
+# complicated; with -v, success (0) is reported if there was indeed any data,
+# not only comments, OR if the $datum was empty. We handled the empty datum case
+# as an error above, so we can trust a successful exit code.
+if grep -v '^#' <<<"$datum" | base64 -d | tar xz -C $confdir; then
+  echo >&4 "<5> Slurm configuration has been (re)loaded from metadata"
+else
+  # Handle errors: move the config to /etc/slurm.err, again for analysis only.
+  rm -rf ${confdir}.err
+  mv $confdir ${confdir}.err
+  echo "Unsuccessfully extracted config saved by $0 on $(date -Is)" \
+       > ${confdir}.err/.readme
+  exit $SYSTEMD_EX_CONFIG
+fi

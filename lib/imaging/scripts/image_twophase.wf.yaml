@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This Daisy workflow creates a new base image from which all nodes in the
+# project are bootstrapped. All nodes are identical, with some customizations
+# performed (later) when deploying a filer node (adding nfs service and its
+# configuration) or a control node (registering a Slurm trigger). Otherwise, the
+# node starts as a control or compute node based on its host name.
+#
+# The imaging is performed in two phases. On the first, the target disk is
+# created and attached to a "bootstrap" instance, which rolls out "lyouts"
+# over it, which are just prepackaged scripts and other control files. On the
+# second, "target" phase, the target disk is booted from, and gets all software
+# packages installed and upgraded. After that, an image is created from this
+# disk, which becomes the one from which control nodes can start very quickly
+# without any need to install or configure anything. The 'boot' and 'target'
+# names in the identifiers reflect the phase, with the suffixes '-d' for disk,
+# '-m' for machine and '-i' for image.
+#
+# It's a good idea to reimage this disk once every 1-2 months, because nodes
+# never receive any software updates. The login node may be an exception; I use
+# mine as the work machine and keep it updated manually, but your pattern may be
+# different. The best time is when the cluster is quiescent between experiments.
+#
+# Daisy cannot read YAML files, so this file is first converted to JSON by the
+# bm-imaging tool, which also handles the packaging of required layouts and
+# figures out values that must be passed to the script. It also helps to use
+# YAML's advanced features (& and *) to make clunky Daisy syntax more readable.
+---
+Name: twophase
+DefaultTimeout: 30m
+
+Vars:
+  source_image:
+    Value: projects/debian-cloud/global/images/family/debian-10
+    Description: Source image or family to customize.
+  family:
+    Value: burrmill-compute
+    Description: Destination Burrmil Compute image family.
+  suffix:
+    Value: ${DATE}
+    Description: Suffix to append to image's real name.
+  bootstrap_image:
+    # Use Ubuntu 18.04; Debian 10 fails to boot with 2 fresh identical drives.
+    Value: projects/ubuntu-os-cloud/global/images/family/ubuntu-minimal-1804-lts
+    Description: Bootstrapping image to boot in phase 1.
+  os_prep:
+    Value: 2-prep_deb10compute.sh
+    Description: Script to pefrorm phase 2 image tasks.
+  description:
+    Value: Baseline Debian 10 image with GPU drivers for all cluster machines.
+    Description: Image description.
+  region:
+    Required: true
+    Description: Region where the service subnet is located.
+
+Sources:
+  1_bootstrap: 1-bootstrap_layout.sh
+  2_osprep:    ${os_prep}
+  layouts:     layouts/
+
+Steps:
+  &10 make-all-d:
+    CreateDisks:
+    - Name: boot-d
+      SourceImage: ${bootstrap_image}
+      SizeGb: '20'
+      Type: pd-ssd
+    - Name: target-d
+      SourceImage: ${source_image}
+      SizeGb: '10'
+      Type: pd-ssd
+
+  &20 start-boot-m:
+    CreateInstances:
+    - Name: boot-m
+      MachineType: e2-standard-1
+      NetworkInterfaces:
+        &net
+      - subnetwork: regions/${region}/subnetworks/service
+      ServiceAccounts:
+        &sacct
+      - email: bm-z-image-build@${PROJECT}.iam.gserviceaccount.com
+        scopes:
+        - https://www.googleapis.com/auth/cloud-platform
+      Disks:
+      - Source: boot-d
+      - Source: target-d
+      Metadata:
+        bucket_url: ${SOURCESPATH}/layouts
+      StartupScript: 1_bootstrap
+
+  &30 wait-boot-m:
+    Timeout: 5m   # This part is very quick.
+    WaitForInstancesSignal:
+    - Name: boot-m
+      Interval: 5s  # Daisy misses the status if using the default 20s.
+      SerialOutput: &serstat
+        Port: 1
+        StatusMatch:  'BUILD_STARTED:'
+        FailureMatch: 'BUILD_FAILURE:'
+        SuccessMatch: 'BUILD_SUCCESS:'
+
+  # Safe to detach, we've unmounted it before signaling completion.
+  &40 detach-target-d:
+    DetachDisks:
+    - DeviceName: target-d
+      Instance: boot-m
+
+  # The following two steps are run at the same time.
+  &50 start-target-m:
+    CreateInstances:
+    - Name: target-m
+      MachineType: e2-highcpu-4
+      NetworkInterfaces: *net
+      ServiceAccounts: *sacct
+      Disks:
+      - Source: target-d
+      StartupScript: 2_osprep
+
+  &55 stop-boot-m:
+    StopInstances:
+      Instances: [ boot-m ]
+
+  &60 wait-target-m:
+    WaitForInstancesSignal:
+    - Name: target-m
+      Interval: 5s  # Daisy misses the status if using the default 20s.
+      SerialOutput: *serstat
+
+  &70 stop-target-m:
+    StopInstances:
+      Instances: [ target-m ]
+
+  &80 image-target-d:
+    CreateImages:
+    - Name: target-i
+      SourceDisk: target-d
+      NoCleanup: true
+      GuestOsFeatures:
+      - UEFI_COMPATIBLE
+      - VIRTIO_SCSI_MULTIQUEUE
+      Family: ${family}
+      RealName: ${family}-${suffix}
+      SizeGB: '10'
+      Description: |-
+        ${description}
+        Built by ${USERNAME} on ${DATE}.
+        Logs are in ${SCRATCHPATH}/logs.
+
+Dependencies:
+  *20: [*10]
+  *30: [*20]
+  *40: [*30]
+  *50: [*40]
+  *55: [*40]
+  *60: [*50]
+  *70: [*60]
+  *80: [*70]

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+stage: GA
+title: BurrMill Slurm Controller
+description: Create, delete, start, stop and monitor computing nodes in
+    a Slurm partition. Use this role on the controller service account.
+includedPermissions:
+- compute.disks.create
+- compute.disks.useReadOnly
+- compute.images.useReadOnly
+- compute.instances.create
+- compute.instances.delete
+- compute.instances.reset
+- compute.instances.start
+- compute.instances.stop
+- compute.instances.setLabels
+- compute.instances.setMetadata
+- compute.instances.setServiceAccount
+- compute.instances.setTags
+- compute.subnetworks.use
+- resourcemanager.projects.get

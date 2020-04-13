@@ -1,0 +1,178 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+source common.inc.sh
+
+readonly LIST_LIMIT=15  # Table size for -l.
+
+async=--async # gcloud has --async; we default to it and use -s for sync.
+dry_run=      # Non-empty = true.
+verbose=      # Set to '--verbosity=debug' to pass to gcloud.
+list_only=    # Non-empty = list last 15 build and exit.
+only_id=      # Non-empty = print only id to stdout on submit.
+min_args=1    # Reset to 0 by the '-l' switch.
+
+while getopts "hlnsvM" opt; do
+  case $opt in
+    l) min_args=0 list_only=y ;;
+    M) only_id=y ;;  # Not advertised in help. Print build id only.
+    n) dry_run=y ;;
+    s) async= ;;
+    v) verbose='--verbosity=debug' ;;
+    *) ForceUsage; break;
+  esac
+done; unset opt; shift $((OPTIND - 1))
+
+# TODO(kkm): Why should they be? What id -s waits totally silently when -M
+#            is in effect, and prints the id (or complete YAML) when done?
+[[ ! $async && $only_id ]] && Die "Options -s and -M are incompatible"
+
+Usage $# $min_args <<EOF
+Usage: $my0 [ -snv ] <target> [ _ARG=value ...]
+ -or-: $my0 -l [tag]
+ e.g.: $my0 mkl
+ e.g.: $my0 mkl _MKL_VERSION=2019.4
+ e.g.: $my0 somedir/mybuild
+ e.g.: $my0 -l kaldi
+
+Submit a build to the GCP Cloud Build, honoring BurrMill conventions.
+
+Switches:
+  -l   List a summary for the last $LIST_LIMIT builds. Accepts optional tag \
+argument
+       to list only builds with that tag.
+  -s   Run build synchronously, pringing the build output to terminal.
+  -n   Print the submit command, but do not run it.
+  -v   Add verbose diagnostics.
+
+When <target> does not contain a '/', then the directory with that name is
+looked up first under etc/build, then lib/build. This is the most common usage
+pattern, although you can use any relative or absolute path to refer to the
+build directory. Use './mydir' to build from a subdirectory of the current
+directory, as 'mydir' alone refers to the standard location. We recommend to
+keep your own added software builds under etc/build, and commit them under
+source control of your fork of Burrmill. We never clobber any files in etc/;
+it's reserved for your use.
+
+Substitutions are provided in the form _ARG=value after the location, fashioned
+after make arguments. Cloud Build requires all user-defined arguments to start
+with the '_'. The '_GS_' prefix is reserved for BurrMill, and may not be used.
+
+ADVANCED INFO, feel free to TL;DR:
+
+Substitutions for _GS_LOCATION, _GS_SCRATCH and _GS_SOFTWARE are provided from
+the project global runtime config. The script will fail if this configuration is
+unavailable.  _GS_LOCATION is always one of {us|eu|asia}. _GS_SCRATCH is a gs:
+URI pointing to the scratch bucket (gs://scratch), where build logs are kept for
+a while.  _GS_SOFTWARE is a similar gs: URI of the software bucket.
+
+The files are automatically deleted from the Scratch bucket after 60 days, as
+are older than 2 latest versions of software tarballs in the Software bucket.
+You do not need to maintain them.
+
+Build logs are sent to \$_GS_SCRATCH/cloudbuild/logs, and temporary staging to
+\$_GS_SCRATCH/cloudbuild/stage. Software tarballs are saved in \$_GS_SOFTWARE
+bucket under the /tarballs/ directory by the build files; This utility only
+passes its URI to them.
+EOF
+
+# The default table is useless and over 9000 columns wide.
+format=$(tr <<EOF -d [:space:]
+table[box](
+  id,
+  tags.join(","),
+  createTime.date("%y%m%d-%R"):label=CREATE_UTC,
+  duration(start=startTime,end=finishTime,precision=0)
+      .sub("[PT]",""):align=right:label=TIME,
+  status.slice(":4").join("")
+        .color(green=SUCC,red=FAIL|TIME,yellow=CANC):label=STAT)
+EOF
+)
+
+if [[ $list_only ]]; then
+  # Optional argument is the tag to filter the list by.
+  filter=${1:+"--filter=tags=$1"}
+  exec $GCLOUD builds list --limit=$LIST_LIMIT --format="$format" $filter
+fi
+
+# Not in the list (-l) mode.
+target=$1; shift
+
+case $target in
+  */*|..|.) ;; # Leave these alone. '..' is ridiculous, but.
+  *)
+    # Look in the user's etc/build first, lib/build next.
+    _t1=${BURRMILL_ETC?}/build/$target
+    _t2=${BURRMILL_LIB?}/build/$target
+    if [[ -f $_t1/cloudbuild.yaml ]]; then
+      target=$_t1
+    elif [[ -f $_t2/cloudbuild.yaml ]]; then
+      target=$_t2
+    else
+      Die "Cannot locate cloudbuild.yaml in either '$_t1' or '$_t2'".
+    fi
+    unset _t1 _t2
+esac
+
+target=$(CleanPath "$target")
+
+substs=
+for sub; do
+  [[ $sub != *=* || $sub = =* || $sub = *= || $sub = *=*,* || sub = *$* ]] &&
+    Die "malformed assignment '$sub'"
+  [[ $sub = _GS_* ]] && Die "the _GS_ prefix is reserved: '$sub'"
+  [[ $sub = PROJECT_ID=* ]] && Die "PROJECT_ID is read-only: '$sub'"
+  substs+="$sub,"
+done
+unset sub
+
+cd $target || Die "Invalid target '/$(realpath -sm --relative-to=/ "$target")'"
+
+[[ -f cloudbuild.yaml ]] || Die "file does not exist: $PWD/cloudbuild.yaml"
+
+# This function best invoked as late as possible, after local checks are done
+# and chances of failure are reduced, because it makes a remote call. On
+# success, it sets gs_{location,scratch,storage}, or dies upon a failure.
+GetProjectGsConfig
+
+gscb_stage=$gs_scratch/cloudbuild/stage
+gscb_logs=$gs_scratch/cloudbuild/logs
+
+substs+="_GS_LOCATION=$gs_location,"
+substs+="_GS_SCRATCH=$gs_scratch,"
+substs+="_GS_SOFTWARE=$gs_software"
+
+[[ $only_id ]] ||
+  Say "Starting build from '$(C c)$PWD$(C)' in project '$(C c)$project$(C)'"
+
+if [[ $dry_run ]]; then
+  run() { Say "Would run in '$PWD':"$'\n'"$(C w)${@@Q}$(C)"; exit 0; }
+elif [[ $verbose ]]; then
+  run() { (set -x; pwd; "$@"); }
+else
+  run() { "$@"; }
+fi
+
+[[ $only_id ]] && format='get(id)'
+
+run $GCLOUD builds submit . $verbose $async             \
+            --substitutions="$substs"                   \
+            --gcs-source-staging-dir=$gscb_stage        \
+            --gcs-log-dir=$gscb_logs                    \
+            --format="$format"
+
+# The dry-run variant of run() exits; we are here iff the McCoy is real.
+if [[ $async && ! $only_id ]]; then
+  Say "Build submitted successfully. To monitor builds, go to
+  $(C c)https://console.cloud.google.com/cloud-build/builds?project=$project$(C)
+or use commands:
+  $(C c)$0 -l$(C)    # List last 15 builds.
+  $(C c)gcloud builds describe $(C y)<id>$(C)        # Show a verbose status \
+record.
+  $(C c)gcloud builds log [--stream] $(C y)<id>$(C)  # Show or follow realtime \
+build log.
+"
+fi
+exit 0

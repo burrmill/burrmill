@@ -1,0 +1,11 @@
+# -*- mode: sh -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# Common configuration for NFSv4 client and server.
+
+NEED_GSSD=no
+NEED_IDMAPD=yes
+NEED_STATD=no

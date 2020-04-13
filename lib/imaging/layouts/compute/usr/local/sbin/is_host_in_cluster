@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# This is invoked from 'Match exec' in /etc/ssh_config with the '%h' as the only
+# argument. We assume the host $1 is in same cluster if its name does not
+# contain dots and matches 'CC-*', where CC is the cluster name obtained from
+# the BURRMILL_CLUSTER variable in systemd service environment.
+
+exec 2>/dev/null
+set -eu
+
+host=$1
+[[ $host && $host != *.* ]] || exit
+
+cluster=$(systemctl show-environment |
+            awk -F= '$1 == "BURRMILL_CLUSTER" { print $2; exit }')
+
+[[ $cluster && $host = ${cluster}-* ]]

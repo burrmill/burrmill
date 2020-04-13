@@ -1,0 +1,23 @@
+#!/bin/bash
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+source functions.inc.sh
+
+nl=
+case ${1-} in
+  -h|--help)
+    Say "Generate random string suitable as a unique suffix for naming GCP \
+objects.
+
+Usage: $my0 [-n] [N]    where N is the length of the string, default 5.
+ e.g.  $my0 4
+
+Options:
+    -n  Add a newline to the end of output.
+    -h  Print this message (but you already know that)."; exit 2 ;;
+  -n) nl=y; shift ;;
+  -*) Die "Invald argument '$1'"
+esac
+
+RandomSuffix ${1-}
+[[ $nl ]] && printf '\n'

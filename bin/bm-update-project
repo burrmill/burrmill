@@ -1,0 +1,1292 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# Set up global resources in a new BurrMill project, as well as certain user's
+# local configuration. Some settings would be impossible to change after VM
+# instances are created; make sure to run it first. The script is safe to run at
+# any later time to modify certain global objects if settings have been
+# unintentionally changed. It is intended to be run only interactively.
+#
+# While not supported out of the box yet, our intention is to allow multiple
+# clusters in a single project, while saving a totally inexperienced user from
+# potentially expensive blunders, such as running a file server on another
+# continent.
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+
+source early_setup.inc.sh
+
+# This is printed as part of the help message, and TODO(kkm): (not yet) when the
+# user runs the tool for the first time (some heuristic is required to guess).
+tool_intro="\
+This tool may be run on an existing BurrMill project any time. It will not alter
+any setting in a way that would interfere with an existing setup. You may run it
+if you know or suspect that something may have been modified.
+
+$(C w)Make sure to have read, and follow the walkthroughs in the BurrMill 101
+crash course at $(C y)https://100d.space/burrmill-101$(C w) before you start.
+$(C)
+When updating BurrMill from upstream, always run this program to apply possibly
+requred configuration changes.
+
+Note that the recovery capabilities of the program are limited; not all damage
+or data loss can be recovered, but it tries to restore the configuration to the
+same desired state that the project has been initialized to.
+
+Initial setup will take about 30 minutes, be patient. Subsequent runs complete
+much faster, depending on the amount of changes that need to be made, usually
+under a minute or two."
+
+OPT_yes= OPT_help=
+while getopts "hy" opt; do
+  case $opt in
+    y) OPT_yes=y ;;
+    h) OPT_help=y ;;
+    *) Error "Invalid switch -$opt; usage follows."
+       OPT_help=y; break ;;
+  esac
+done; shift $((OPTIND - 1)); unset opt
+
+case ${1-} in
+  '') ;;
+  h|he*|--he*) OPT_help=y ;;
+  *) Die "The only accepted positional argument is 'help'"
+esac
+
+
+if [[ $OPT_help ]]; then
+  echo >&2 "
+usage: $my0 [-y] [-h | help ]
+
+Set up a new GCP project, or upgrade or fix inconsistencies in an existing one.
+
+Options:
+  -y  - Skip the two initial project and billing confirmation questions.
+  -h  - Display this message and exit.
+
+$tool_intro"
+  exit 2
+fi
+
+RequireInteractive
+
+#TODO(kkm): Add checks for tools missing on the user's machine.
+
+# Some steps use temp files, so this is easier to make the temp directory
+# current. Since the temp files are small,not exceeding a few KB, but sometimes
+# are sensitive, prefer the little tmpfs per-user mount if available.
+tempdir=$(mktemp -d -p "${XDG_RUNTIME_DIR-}")
+trap 'cd /; rm -rf $tempdir' EXIT
+chmod 700 $tempdir
+cd $tempdir
+
+#==============================================================================#
+# Connectivity check (skip if -y).
+#==============================================================================#
+
+if [[ ! $OPT_yes ]]; then
+  SayBold "Checking connectivity to Google services"
+  CLOUDSDK_CORE_DISABLE_PROMPTS= $GCLOUD info --run-diagnostics ||
+    Die "Google services are inaccessible.
+
+Fix network issues and make sure that you can access accounts.google.com from
+your browser, or using 'curl https://accounts.google.com'. The most common
+reason for this error is missing the ca-certificates package, so that HTTPS
+connections cannot be established."
+fi
+
+#==============================================================================#
+# Account check.
+#==============================================================================#
+
+SayBold "Checking whether your local Google Cloud SDK is configured"
+
+# A pesky edge case. 'gcloud init' fails if no configuration exists, or none is
+# set to active. Must be a bug.
+if [[ ! $($GCLOUD config configurations list \
+                  --format='get(name)' --filter=is_active=true) ]]; then
+  Say "You have no active configuration. We'll fix that"
+  # Try to activate 'burrmill', then 'default', then any at all.
+  for _name in burrmill default '*'; do
+    _candidate=$($GCLOUD config configurations list \
+                        --format='get(name)' --filter="name:$_name" --limit=1)
+    if [[ $_candidate ]]; then
+      $GCLOUD config configurations activate $_candidate
+      break
+    fi
+  done
+  [[ $_candidate ]] || $GCLOUD config configurations create default
+  unset _name _candidate
+fi
+Say $OK "Google Cloud SDK is configured"
+
+# Right before the first prompt. Seems unobtrusive enough?
+SayBold "
+=======================================================================
+Make sure to have read, and follow the walkthroughs in the BurrMill 101
+crash course at $(C y)https://100d.space/burrmill-101$(C w) before you begin.
+=======================================================================
+"
+
+until
+  account=$($GCLOUD auth list '--format=value(account)' --filter='status:*')
+  project=$($GCLOUD config list --format='get(core.project)')
+  [[ $account && $project ]] && {
+    [[ $OPT_yes ]] ||
+      Confirm "You are logged on as $(C c)$account$(C) into project" \
+              "$(C c)$project$(C).
+Is this the BurrMill project you are configuring"; }
+do
+  Say "Looks like you need to authenticate or fix local configuration
+Invoking '$(C c)gcloud init$(C)'. Press Ctrl+D at any of its questions to start over."
+  OPT_yes=  # Return to confirmation mode.
+  # gcloud does not return failure on cancel.
+  CLOUDSDK_CORE_DISABLE_PROMPTS= $GCLOUD init --skip-diagnostics
+done
+
+# Since we know the project by now (and are not concerned with regions or zones
+# in this script), complete the definition of common variables identifying
+# project assets.
+source late_setup.inc.sh
+
+GCLOUD="$GCLOUD --project=$project"
+
+#==============================================================================#
+# Check if billing enabled for the selected project.
+#==============================================================================#
+
+SayBold "Checking billing configuration of your project"
+
+bchange=
+benabled=$($GCLOUD beta billing projects describe \
+                   $project --format='get(billingEnabled)')
+# Should be JSON 'true', but is returned as a string 'True'. Accept either.
+if [[ $benabled = [Tt]* ]]; then
+  bacct=$($GCLOUD beta billing projects describe \
+                  $project --format='get(billingAccountName)')
+  Say "Project $project is linked to the following billing account"
+  $GCLOUD beta billing accounts list --filter="(name=$bacct)"
+  [[ $OPT_yes ]] ||
+    Confirm -y "$(C w)If unsure, answer 'N'$(C), and we'll show you the list" \
+               "of all billing accounts accessible to you.{$LF1}Is this the" \
+               "account you want to use" || bchange=y
+else
+  Warn "Your project $project is not linked to any billing accounts."
+  bchange=y
+fi
+
+if [[ $bchange ]]; then
+  bacct=
+  while [[ ! $bacct ]]; do
+    # Get accounts for a menu display.
+    blist=$($GCLOUD beta billing accounts list --filter='(open=true)' \
+                    --format="value(format('{0}  $(C w){1}$(C)',
+                                            name, displayName))")
+    if [[ ! $blist ]]; then
+      Warn "You do not have any billing accounts.
+Go to the Cloud Console Billing section at
+
+  https://console.cloud.google.com/billing
+
+and create an account. You'll need to click on the $(C w)Upgrade$(C) button and
+enter payment details to receive your sign-up bonus of $300 (if eligible).
+"
+      Pause
+      continue
+    fi
+
+    Say "Select a billing account to link to your project $project"
+    mapfile -t blist <<<"$blist"
+    blist+=('None of these, create a new account')
+    bacct=$(SimpleMenu "${blist[@]}")
+    if [[ ! $bacct || $bacct = N* ]]; then
+      bacct=
+      Say "Go to the Cloud Console Billing section at
+
+  https://console.cloud.google.com/billing
+
+and create an account. You may need to click on the $(C w)Upgrade$(C) button and
+enter payment details, since the 'trial mode' account without billing enabled
+is not sufficient.
+"
+      Pause
+      continue
+    fi
+  done
+
+  Say "Linking billing account $bacct to your project $project"
+  $GCLOUD --no-user-output-enabled \
+          beta billing projects link $project --billing-account=$bacct
+fi
+
+unset bacct bchange benabled blist
+
+#==============================================================================#
+# Putting (new) files into user's etc/ directory from the skel/.
+#==============================================================================#
+
+SayBold "Checking if your etc/ directory needs newer example files." \
+        "We never clobber your existing files there."
+
+cp -Rnpv ${BURRMILL_LIB?}/skel/* ${BURRMILL_ETC?}/
+
+#==============================================================================#
+# Network check.
+#==============================================================================#
+
+# We use 10.96.0.0/11 overall, and, to make numbering more sensible, vary the
+# second byte per region, and allocate cluster networks as /19.
+
+# Network check is the first, as it may reveal the user messed up and selected
+# a wrong project. Do this before messing with other configuration aspects.
+
+SayBold "Checking your default network"
+
+Say "Enabling the Compute API. This may take up to 5 minutes"
+$GCLOUD services enable compute.googleapis.com
+
+# AUTO, CUSTOM or empty (no default network). Suppress error messages in case
+# the default network does not exist.
+netmode=$($GCLOUD compute networks describe 'default' --verbosity=none \
+                  --format='get(x_gcloud_subnet_mode)' || true)
+
+case ${netmode^^} in
+  CUSTOM)
+    Say $OK "Default network is already in CUSTOM mode" ;;
+  '')
+    Say "Default network does not exist, creating it"
+    $GCLOUD --no-user-output-enabled \
+            compute networks create default --subnet-mode=custom ;;
+  *)
+    Say "Default network exists, and is in AUTO subnet mode." \
+        "We'll try to fix this"
+    # See if there are instances using it.
+    temp=$($GCLOUD compute instances list \
+                   --filter='networkInterfaces.network~.*/default$' \
+                   --format='get(name)' --limit=1)
+    if [[ $temp ]]; then
+      Warn "There are VM instances on the default network:"
+      $GCLOUD compute instances list
+      Say "First, make sure you selected the correct, freshly created project.
+$(C y)It must be dedicated to running BurrMill.$(C)
+
+Here's the list of all your projects:"
+      $GCLOUD projects list
+      Confirm "Is '$(C c)$project$(C)' the one you are initializing" \
+              "for BurrMill" ||
+        Die "Run this script again, and select the correct project"
+
+      Say "If you simply played around with your new project,
+but do not know GCP well enough to be completely sure what you did, you can
+simply shut down this project and create a new one. This is the best option
+for a new user. Note that by default you have a quota of 10 projects, but it
+also counts against projects deleted within last 30 days."
+      Confirm "Do you want to delete this project '$(C c)$project$(C)'" ||
+        Die "You cannot set up this project for BurrMill.
+
+Please re-run this script. You'll have an option to create a new project.
+Alternatively, if you feel confident, you can delete all VMs from the Cloud
+Console. If you do that, also check, after deleting the VMs, that there are
+no disks left behind."
+      Say "Shutting down project '$(C c)$project$(C)'. It may take a while. " \
+          "You can un-delete a project within 30 days."
+      CLOUDSDK_CORE_DISABLE_PROMPTS= $GCLOUD projects delete $project
+      Say "Re-run this script. You'll have an option to create a new project"
+      exit 1
+    fi
+
+    Say "Deleting firewall rules attached to the default network"
+    temp=$($GCLOUD compute firewall-rules list \
+                   --filter='network~/default$' --format='get(name)')
+    [[ $temp ]] && $GCLOUD compute firewall-rules delete $temp
+
+    Say "Deleting the default network. This may take a few minutes"
+    $GCLOUD compute networks delete 'default'
+
+    Say "Creating a new default network with CUSTOM subnet mode"
+    $GCLOUD --no-user-output-enabled \
+            compute networks create 'default' --subnet-mode=custom
+esac
+unset netmode temp
+
+#==============================================================================#
+# Check for dangerous firewall rules
+#==============================================================================#
+
+Say "Setting up and checking firewall rules"
+
+badfilt="direction=INGRESS AND allowed.flatten():* AND
+         sourceRanges.flatten()~\b0.0.0.0/0\b"
+badrules=$($GCLOUD compute firewall-rules list \
+                   --format='value(name)' --filter="$badfilt")
+if [[ ${badrules} ]]; then
+  Warn "The following firewall rules allow access from anywhere on the Internet"
+  $GCLOUD compute firewall-rules list --filter="$badfilt" --format="table[box]\
+          (name,allowed[].map().firewall_rule().list():label=ALLOW,\
+          sourceRanges.list():label=SRC_RANGES)"
+  Say "We'll delete them, since we are using much safer IAP tunnels for access"
+  $GCLOUD compute firewall-rules $badrules
+fi
+
+_RuleExists() { $GCLOUD compute firewall-rules describe $1 &>/dev/null; }
+
+# Delete another well-known auto-created rule, if present.
+rulename=default-allow-internal
+if _RuleExists $rulename; then
+  Say "Deleting autocreated rule $rulename"
+  $GCLOUD compute firewall-rules delete $rulename
+fi
+
+# On initial setup, we create only the IAP SSH access rule. Per-cluster rules
+# are created when clusters are set up later. The 35.235.240.0/20 addresses
+# are reserved by Google as the source pool for IAP connections.
+rulename=burrmill-iap-access
+if ! _RuleExists $rulename; then
+  Say "Creating firewall rule '$(C c)$rulename$(C)' to allow SSH access" \
+      "through IAP tunnels"
+  $GCLOUD --no-user-output-enabled \
+          compute firewall-rules create $rulename \
+          --allow tcp:22,icmp --priority=30000 \
+          --source-ranges=35.235.240.0/20 \
+          --description='Allow SSH and ICMP traffic through IAP tunnel'
+fi
+
+unset badfilt badrules rulename
+unset -f _RuleExists
+
+SayBold "This is your current firewall rules$(C)
+If you did not create any, you should see only BurrMill-managed rules with
+the names prefixed with '$(C c)burrmill-$(C)'"
+
+echo '' >&2
+$GCLOUD compute firewall-rules list --format="table(
+        name, direction, priority,
+        sourceRanges.list():label=SRC_RANGES,
+        destinationRanges.list():label=DEST_RANGES,
+        allowed[].map().firewall_rule().list():label=ALLOW,
+        denied[].map().firewall_rule().list():label=DENY,
+        sourceTags.list():label=SRC_TAGS,
+        targetTags.list():label=TARGET_TAGS, disabled)"
+echo '' >&2
+
+#==============================================================================#
+# Services check.
+#==============================================================================#
+# Ensure services are enabled before setting up everything else.
+SayBold "Enabling Google APIs in your project"
+
+# Note that some of these services are dependencies of others (e.g., Cloud Build
+# requires Pub/Sub). We list them here explicitly, so they are not prompted to
+# disable.
+declare -a svc_required=(
+  cloudbilling.googleapis.com         # Cloud Billing API.
+  cloudbuild.googleapis.com           # Cloud Build API.
+  clouderrorreporting.googleapis.com  # Stackdriver Error Reporting API.
+  cloudfunctions.googleapis.com       # Cloud Functions API
+  cloudresourcemanager.googleapis.com # Cloud Resource Manager API.
+  compute.googleapis.com              # Compute Engine API.
+  containerregistry.googleapis.com    # Container Registry API.
+  deploymentmanager.googleapis.com    # Cloud Deployment Manager V2 API.
+  iamcredentials.googleapis.com       # IAM Service Account Credentials API.
+  iap.googleapis.com                  # Cloud Identity-Aware Proxy API.
+  logging.googleapis.com              # Stackdriver Logging API.
+  monitoring.googleapis.com           # Stackdriver Monitoring API.
+  oslogin.googleapis.com              # Cloud OS Login API.
+  pubsub.googleapis.com               # Cloud Pub/Sub API.
+  runtimeconfig.googleapis.com        # Cloud Runtime Configuration API.
+  secretmanager.googleapis.com        # Secret Manager API
+  sourcerepo.googleapis.com           # Cloud Source Repositories API.
+  stackdriver.googleapis.com          # Stackdriver API.
+  storage-api.googleapis.com          # Google Cloud Storage JSON API.
+  storage-component.googleapis.com    # Cloud Storage XML API.
+)
+
+# Some of the services are enabled as dependencies of others, but they cannot be
+# enabled explicitly, as they are marked "obsolete" by Google, still enabled as
+# part of the enabling process anyway. We do not consider them "extra" services,
+# i.e. never try to either enable or disable them.
+declare -a svc_whatever=(
+  source.googleapis.com               # Legacy repo API; CFunctions depend on it
+)
+
+required=$(printf '%s\n' ${svc_required[@]} | LC_ALL=C sort)
+ignored=$(printf '%s\n' ${svc_whatever[@]} | LC_ALL=C sort)
+actual=$($GCLOUD services list --format='value(name.basename())'|LC_ALL=C sort)
+
+missing=$(join -v1 <(echo "$required") <(echo "$actual"))
+extra=$(join   -v2 <(echo "$required") <(echo "$actual"))
+extra=$(join   -v1 <(echo "$extra")    <(echo "$ignored"))
+
+if [[ $missing ]]; then
+  Say "Enabling the following required Google APIs:
+$(C c)${missing}$(C)
+This can take a few minutes, be patient."
+  # A quirk: PubSub better be enabled before CloudBuild.
+  [[ $missing = *pubsub.* ]] && $GCLOUD services enable pubsub.googleapis.com
+  $GCLOUD services enable $missing
+fi
+
+[[ $missing ]] || Say $OK "All required services are already enabled"
+
+if [[ ${extra} ]]; then
+  Warn "The following Google APIs are not required to run BurrMill:
+$(C c)${extra}$(C)
+If you do not know what they are for, it's safe to disable them."
+  Confirm "Disable these services" &&
+    # 'services disable' behaves wonky, and sometimes "forgets" to remove some
+    # services, when the --force against dependencies is required; and it is
+    # required even when both services X and Y dependent on X are listen in a
+    # single command line. So disable them one by one.
+    for svc in $extra; do
+      $GCLOUD services disable --force $svc
+    done
+fi
+
+unset actual extra missing required svc svc_required svc_whatever
+
+#==============================================================================#
+# Project-wide runtime config
+#==============================================================================#
+SayBold "Ensuring project-wide runtime config exists"
+
+RuntimeConfigCreate burrmill 'Project-wide BurrMill settings' || true
+
+#==============================================================================#
+# Establish multiregion.
+#==============================================================================#
+# TODO(kkm): Can we support clusters on multiple continents in a single project?
+#            This is a very low priority now.
+SayBold "Checking project storage multiregion"
+
+GetProjectGsConfig -p  # Set gs_* variables if present.
+
+case $gs_location in
+  ''|asia|eu|us) true ;;
+  *) Warn "The variable $(C c)gs_location$(C) of the project $(C c)$project$(C)\
+is set to an invalid value '$(C c)$gs_location$(C)'.
+We are going to reset the location. You must select a valid one on the next
+step. If you are recovering a misconfigured project, make sure to choose the
+originally set location for the storage buckets."
+     gs_location=
+esac
+
+if ! [[ $gs_location ]]; then
+  Say "Project's storage multiregion selection $(C c gs_location) is not set."
+
+  # If there are buckets, try to get it from them. The global runtime config
+  # might have been corrupted.
+  jsbuckets=$(GsListBuckets)
+
+  if [[ $jsbuckets ]]; then
+    Say "$(C y NOTE:) There are some storage buckets in the project already."
+    GsPrintBuckets >&2 "$jsbuckets"
+  fi
+  SayBold "$(C)You should have read the '$(C w)BurrMill 101$(C)' guide. If "\
+        "you did not, please do so now at:" \
+        "$LF2i$(C w)https://100d.space/burrmill-101$(C)${LF2}The selected" \
+        "region will be stored with other project globals in" \
+        "project's runtime config${LF1}variable" \
+        "'$(C c)projects/$project/configs/burrmill/variables/globals'$(C)." \
+        "${LF2}$(C w)You should never attempt to alter this variable$(C)." \
+        "It's a passive piece of data, and changing${LF1}it won't move any" \
+        "resources to a different location, but it will cause many things to" \
+        "break.$LF1$(C w)Once selected, the location cannot be" \
+        "changed$(C).${LF2}Select one of the GCP multiregions:${LF1}"
+
+  gs_location=$(SimpleMenu -c "us   $(C w)(USA)$(C)"    \
+                              "eu   $(C w)(Europe)$(C)" \
+                              "asia $(C w)(Asia-Pacific)$(C)")
+fi
+
+# Assert we have the location.
+: ${gs_location:?}
+
+#==============================================================================#
+# Service subnet. We need at least one to bootstrap.
+#==============================================================================#
+SayBold "Setting up or checking servicing subnets"
+
+svcnets=($($GCLOUD compute networks subnets list \
+                   --filter=name:service --format='value(region)'))
+
+if [[ ${svcnets-} ]]; then
+   Say $OK "Found ${#svcnets[*]} service subnet(s) in regions:" \
+       "$(C c)${svcnets[*]}"
+else
+  Say "Select a region in which you are going to build software and OS" \
+      "images.${LF}It should be close to the regions where are you going" \
+      "to run your experiments, and must be within the global multiregion" \
+      "'$(C c)$gs_location$(C)' to avoid unnecessary network traffic charge."
+  rm -f *
+  _RegionGen() { gcloud compute regions list --format="get(name)"; }
+  until
+    svcrgn=$(AskWithCompletion -m\? -g_RegionGen "region") && [[ $svcrgn ]];do :
+  done
+  unset _RegionGen
+
+  Say "Creating servicing subnet '$(C c)service$(C)' in region" \
+      "'$(C c)$svcrgn$(C)'"
+
+  rid=$($GCLOUD compute regions describe $svcrgn --format='value(id)')
+  # Just using the fact that the GCP regions IDs are numbered from 1000 up and
+  # are equal 0 mod 10. Tangentially, the zones use the IDs 2000 and up, and are
+  # always 1000 + regionID + n, 0<=n<=9. But if you think you grok the whole
+  # pattern, n=0,1,... do not match the a,b,... suffixes. Sorry, Sherlock.
+  [[ $rid = 1??0 ]] && n=${rid::3} || n=$((RANDOM % 100))
+  $GCLOUD compute networks subnets create 'service' \
+          --network='default' --region=$svcrgn --range=192.168.$n.0/28 \
+          --enable-private-ip-google-access \
+          --description="BurrMill servicing subnet for $svcrgn (ID $rid)"
+fi
+
+unset n rid svcnets
+
+#==============================================================================#
+# Roles.
+#==============================================================================#
+SayBold "Checking or creating custom security roles"
+
+# Put existing service accounts into assoc array as keys.
+declare -A existing="($($GCLOUD iam roles list \
+                                --format='value(format("[{0}]=1 ", name))'))"
+
+# Create roles for bucket access and machine management. There are no good
+# matching stock roles in the GCE IAM, they are all too wide.
+_CreateMaybe() {
+  if [[ ! ${existing[$1]-} ]]; then
+    local r=${1##*/}; local rfile="$BURRMILL_LIB/policy/$r.role.yaml"
+    [[ -r $rfile ]] || Die "Role definition file $rfile is missing"
+    Say "Creating role '$(C c)$1$(C)'"
+    # storage.* permissions cause spurious "API is not enabled" warnings, even
+    # when they are, and recite the roles back on output. Silence both.
+    $GCLOUD --verbosity=error --no-user-output-enabled \
+            iam roles create $r --file=$rfile
+  else
+    Say $OK "Role '$(C c)$1$(C)' already exists."
+  fi
+}
+
+_CreateMaybe $ro_bucket_readonly
+_CreateMaybe $ro_bucket_readwrite
+_CreateMaybe $ro_hpc_controller
+_CreateMaybe $ro_registry_service
+
+unset existing; unset -f _CreateMaybe
+
+#==============================================================================#
+# Service accounts,
+#==============================================================================#
+
+SayBold "Checking or creating service accounts"
+
+# Account purposes:
+# * compute: Computing nodes run under this account. They must have R/O access
+#     to dataset bucket, if streaming source data from it. You may additionally
+#     give it R/O or R/w to the general storage bucket, if tasks require so,
+#     but Kaldi training does not require it.
+# * control: This is the cluster Slurm controller. It has a custom role that
+#     allows creating and deleting VMs. It does not need access to training
+#     data buckets.
+# * manage: This is you, when logged into the login node. We give it R/W access
+#     to the general bucket, and R/O to datasets, as presumably you put the
+#     data from an external source. You can grant it R/W, if needed later.
+#
+# All 3 accounts need R/O access to the host key secret, because they pull the
+# SSH host identity key on boot.
+#
+# * bm-z-image-build: This is the account under which daisy launches VM to build
+#     images and disk snapshots. No access to data buckets is needed, but it has
+#     R/W on the scratch bucket, where it stores its temporary files and logs,
+#     and R/O on software and the image registry, where it gets software from as
+#     well. Also, lacking the snapshot operation, we give this account broad
+#     (perhaps, too broad) permissions on the GCE.
+# * bm-z-background-svc: This account cleans up the container registry, deleting
+#     untagged images. It has an admin access to the registry bucket, but a
+#     bare minimum elsewhere.
+
+# Put existing service accounts into assoc array as keys.
+declare -A existing="($($GCLOUD iam service-accounts list \
+                                --format='value(format("[{0}]=1 ", email))'))"
+
+_CreateMaybe() {
+  if [[ ! ${existing[$1]-} ]]; then
+    Say "Creating $2 account '$1'"
+    $GCLOUD iam service-accounts create ${1%@*} \
+            --description="$2" --display-name="$2";
+  else
+    Say $OK "Account '$2' $1 already exists"
+  fi
+}
+
+_CreateMaybe $acc_compute  "Cluster compute node identity"
+_CreateMaybe $acc_control  "Cluster control node identity"
+_CreateMaybe $acc_manage   "Cluster manage/login node identity"
+_CreateMaybe $acz_imager   "Servicing VM OS image and snapshots"
+_CreateMaybe $acz_backsvc  "Servicing image registry"
+
+unset existing; unset -f _CreateMaybe
+
+#==============================================================================#
+# Permission grants for accounts.
+#==============================================================================#
+SayBold "Granting necessary permissions to service accounts"
+
+# YAML-formatted binding to role.
+_PrintBinding() { printf -- '- members:\n  - %s\n  role: %s\n' "$1" "$2"; }
+
+_BewareQuotaError() {
+  Die "Updating policy was unsuccessful. A message printed above explains why.
+
+If the error was '$(C w)(gcloud.projects.set-iam-policy) RESOURCE_EXHAUSTED',
+$(C)then wait out 2 minutes and run the script again. This happens when you
+run this tool a few times in a row, or sometimes without any reason at all."
+}
+
+#=== Project-wide permissions and audit configuration ===
+
+{ # Add all cluster accounts to standard R/O and logging roles.
+  for role in roles/compute.viewer \
+              roles/logging.logWriter \
+              roles/monitoring.metricWriter
+  do
+    for acc in $acc_compute $acc_control $acc_manage; do
+      _PrintBinding serviceAccount:$acc $role
+    done
+  done
+
+  # The manage account does not strictly need these roles, but it makes it
+  # convenient to debug Slurm scripts on a login node, running under acc_manage.
+  for acc in $acc_control $acc_manage; do
+    _PrintBinding serviceAccount:$acc $ro_hpc_controller
+  done
+
+  _PrintBinding serviceAccount:$acz_backsvc $ro_registry_service
+  # This gives the images account a lot of mojo, but there is probably little
+  # point in granting fewer perms.
+  _PrintBinding serviceAccount:$acz_imager roles/compute.instanceAdmin.v1
+  _PrintBinding user:$account roles/storage.admin
+} | y2j > addbinds.json
+
+# Also set audit policy for secret accesses
+y2j > addaudit.json <<EOF
+- auditLogConfigs:
+  - logType: ADMIN_READ
+  - logType: DATA_READ
+  - logType: DATA_WRITE
+  service: secretmanager.googleapis.com
+EOF
+
+Say "Updating project policy, be patient"
+$GCLOUD projects get-iam-policy $project --format=json >basepol.json
+jq '.bindings += input | .auditConfigs += input' \
+   basepol.json addbinds.json addaudit.json >newpol.json
+
+$GCLOUD projects set-iam-policy $project newpol.json --format=none ||
+  _BewareQuotaError
+
+Say "Your account $(C c $account) has been granted" \
+    "the $(C c storage.admin) role"
+
+# Remove the Compute Engine default service account from project editor role, it
+# is a historic grant, and is too powerful. Doing this is recommended by Google:
+# <https://cloud.google.com/compute/docs/access/create-enable-service-accounts-for-instances#using_the_default_service_account>.
+#
+# Set up more discretionary grants for the image builder account per Best
+# Practices: <https://cloud.google.com/compute/docs/access/create-enable-service-accounts-for-instances#best_practices>.
+acc=$($GCLOUD compute project-info describe \
+              --format='value(defaultServiceAccount)')
+# Might have been removed already, ignore errors.
+$GCLOUD projects remove-iam-policy-binding $project \
+        --member=serviceAccount:$acc --role=roles/editor &>/dev/null || true
+
+#=== Permissions on compute accounts ===
+
+# This is required so that the control and manage accounts can start VMs with
+# the identity of the compute accounts.
+
+for acc in $acc_control $acc_manage; do
+    _PrintBinding serviceAccount:$acc roles/iam.serviceAccountUser
+done | y2j > addbinds.json
+
+Say "Updating policy on service account $(C c $acc_compute)"
+$GCLOUD iam service-accounts get-iam-policy $acc_compute \
+        --format=json >base.json
+jq '.bindings += input' base.json addbinds.json >newpol.json
+$GCLOUD iam service-accounts set-iam-policy --format=none $acc_compute \
+        newpol.json >/dev/null || _BewareQuotaError
+
+rm -f *
+
+unset acc role
+unset -f _BewareQuotaError _PrintBinding
+
+#==============================================================================#
+# Buckets. We must have the gs_location set already.
+#==============================================================================#
+# I'm stating the obvious, but this part is awfully complex.
+SayBold "Creating or verifying maintenance storage buckets"
+
+# Make a slug out of project name. In case the user went with the default
+# project naming (holy-molly-123456), trim off the suffix, else leave as is.
+# TODO(kkm): Looks like this should be factored out somehow into the common
+#            bucket creation utility when it's complete.
+slug=$(perl <<<$project -pe 's/-\d{3,}$//')
+
+# E.g., _BucketSanity "$ploc" "Bucket x pointed by label y"
+# Make sure to always quote the first argument.
+# Issue diagnostic to stderr, and print one-character bucket state:
+#  A = Absent (loc is empty).
+#  E = Location error, not close to gs_location. Unusable.
+#  W = Location warning, e.g. regional. "You know what you're doing.
+#  K = The bucket looks good, no diagnostic was issued.
+_BucketSanity() {
+  local ploc=$1 thing=$2
+  if [[ ! $ploc ]]; then
+    Warn "$thing does not exist"
+    echo 'A'
+  elif [[ $ploc = $gs_location ]]; then
+    echo 'K'
+  elif [[ $ploc = ${gs_location}* ]]; then
+    Warn "$thing is in the regional storage $(C c)$ploc$(C), within the"   \
+         "project selected multiregion $(C c)$gs_location$(C), but the"    \
+         "multiregional storage is preferred."$'\n'"You can safely ignore" \
+         "this warning if you know what you are doing"
+    echo 'W'
+  else
+    Warn "$thing
+is in the location $(C c)$ploc$(C) that does not match the project \
+selected gs_location=$(C c)$gs_location$(C).
+Cross-continental networking is both more expensive and less reliable."
+    echo 'E'
+  fi
+}
+
+# No arguments; print a help message with the Die function.
+_FixYourMess() {
+  Die "Your BurrMill service buckets are mislabeled.
+
+These buckets are special. A lifetime policy is associated with each them, to
+prevent stuff from accumulating and causing you extra charges. Never use them
+for what they were not intended.
+
+The label '$(C c burrmill_role)' should mark exactly one bucket each \
+with the roles
+'$(C c scratch)' and '$(C c software)' respectively. Refer to the \
+table above, figure out
+which is which, and label them correctly with the command
+
+    gsutil label ch -l burrmill_role:$(C y)<ROLE>$(C) gs://$(C y)<BUCKET>$(C)
+
+or remove extra label with the command
+
+    gsutil label ch -d burrmill_role gs://$(C y)<BUCKET>$(C)
+
+or remove extra buckets with the command
+
+    gsutil rm -r gs://$(C y)<BUCKET> $(C w)(no slash at end!)$(C)
+
+or relabel and/or delete buckets using the Cloud Console at
+
+    https://console.cloud.google.com/storage/browser?project=$project
+
+It is safe to delete the $(C c scratch) bucket and run this script \
+again to re-create
+it. The $(C c software) bucket should never be deleted, however, so \
+figure out which is
+the right one. The $(C c keys) subdirectory in the $(C c software) \
+bucket is essential for proper
+day-to-day operation of BurrMill.
+"
+}
+
+# E.g.,: _MakeOrSanityCheckBucket scratch
+#
+# TODO(kkm): Desired target configuration: there is exactly one bucket tagged
+# with the label burrmill_role=$1, it is in the location compatible with
+# gs_location, and the global runtime config var "gs_$1" is set to point to
+# it. We only handle two cases here: when the configuration matches the above,
+# and a "clean slate" state, when there is neither a bucket nor a label exist.
+#
+# Also, gs_location is the strongest ground truth signal. We can pretty much
+# unlabel everything outside of it.
+#
+# I'm not implementing a full attempt at recovery now. But it's certainly
+# possible.
+#
+# The argument also name a variable in this script, if $1 is 'scratch', the
+# variable name is gs_scratch (initially set from the global runtime config, if
+# it already exists. This function both reads and changes this variable, using
+# bash 4.2 techniques: ${!var_naming_var} and 'printf -v $var_naming_var ...',
+# respectively. Bash 4.3 introduced true reference variables, but we're using
+# only features of bash 4.2.
+_MakeOrSanityCheckBucket() {
+  local pause=   # Set to y to pause script for user to read stuff.
+  # Naming: bVAR originate from bucket labels, pVAR from project config.
+  local gs_brole=gs_$1  # Variable naming another variable.
+  local brole=$1 #
+  local bcnt     # Count of buckets labeled with burrmill_role=$brole
+  local bname    # Name of bucket burrmill_role=$brole; valid if $cnt=1.
+  local bloc     # Location of same, also valid only for $cnt=1.
+  local bsane=A  # Sanity indicator, see _BucketSanity.
+  local pname=${!gs_brole}   # Value of the project config gs_$brole.
+  local ploc=    # Location of bucket named by pname. Empty if not found.
+  local prole=   # burrmill_role of bucket $pname. Empty is ambig, check ploc.
+  local psane=A  # Sanity indicator, see _BucketSanity.
+
+  # We adding this fine print to a few messages, so makes sense.
+  local if_you_answer_no="
+If you answer No to the following question, the script will print a help message
+about fixing the mislabeling problem manually, and then exit."
+
+  Say "Creating or verifying the $(C c)$brole$(C) bucket"
+
+  # Count buckets in role. Subst '{}' if jsbuckets is empty, to get a solid 0 as
+  # the bcnt, not an empty string. loc and name are ambiguous when bcnt != 1,
+  # so take care not to use them under this condition. read should not EOF,
+  # since we always produce at least 3 lines, even from a '{}' on input.
+  { read bcnt; read bname; read bloc; } < <(
+    jq -r <<<"${jsbuckets:-{\}}" --arg role $brole \
+       'with_entries(select(.value.Labels.burrmill_role? == $role)) |
+           ( length,
+             (keys[0] | rtrimstr("/")),
+             (.[]["Location constraint"]//"" | ascii_downcase) )' )
+
+  # Get the bucket by pname if not empty, so we can sanitize its location.
+  if [[ $pname ]]; then
+    { read prole; read ploc; } < <(
+      jq -r <<<"${jsbuckets:-{\}}" --arg name $pname/  \
+         '.[$name] | ( .Labels.burrmill_role?//"",
+                       (.["Location constraint"]//"" | ascii_downcase) )' )
+
+    psane=$(_BucketSanity "$ploc" "Bucket '$(C c $pname)' registered in the" \
+                          "project's runtime config as the role" \
+                          "'$(C c gs_${brole})'")
+    [[ $psane = [AW] ]] && pause=y
+  fi
+
+  case $bcnt in
+    0):
+      # Do not create a new bucket if pname has tested unusable.
+      # Try to just label the bucket $pname, if exists.
+      if [[ $psane = [KW] ]]; then
+        if [[ $prole ]]; then
+          pause=  # We are already paused.
+          Warn "Project label $(C c gs_${brole}) names the bucket $(C c $pname)
+for the role $(C c)$brole$(C), but it is already labeled as $(C c)$prole$(C).\
+$if_you_answer_no"
+          Confirm -y \
+               "Is $(C c $pname) the right bucket for the role $(C c)$brole" ||
+            _FixYourMess
+        fi
+        Say "Labeling bucket $(C c)${pname}$(C) as $(C c)${brole}"
+        gsutil label ch -l burrmill_role:$brole $pname
+        gsutil lifecycle set "$BURRMILL_LIB/policy/$brole.lifecycle.json" $pname
+      elif [[ $psane = A ]]; then
+        # No bucket named $pname exists, reuse name if present.
+        if [[ ! $pname ]]; then
+          pname=gs://${brole}-${slug}-$(RandomSuffix 5)
+        fi
+        builtin printf -v $gs_brole %s "$pname"
+
+        Say "Creating bucket $(C c)$pname$(C) for the role $(C c)$brole$(C)"
+        GsMakeBuckets -l $gs_location $pname
+        gsutil label ch -l burrmill_role:$brole $pname
+        gsutil lifecycle set "$BURRMILL_LIB/policy/$brole.lifecycle.json" $pname
+        psane=K  # Was A, but now we know we created a good one.
+      fi
+      # We did not have any bname, so transfer p-sanity to the new bucket.
+      bsane=$psane
+      ;;
+
+    1):
+      # We land here with the most common case of a correct configs (bname and
+      # pname is one and same, and check up sane). If buckets are different, it
+      # is impossible that they are both labeled with $brole, otherwise the
+      # count could not have been 1.
+      bsane=$(_BucketSanity "$bloc" \
+                    "The only bucket '$(C c $bname)' labeled '$(C c $brole)'")
+      [[ $bsane = W ]] && pause=y
+
+      if [[ $bname = $pname ]]; then
+        # Nothing to do, but may pause for location sanity warnings. If not,
+        # just log a boring config OK message.
+        [[ $psane = K ]] &&
+          Say $OK "Bucket $(C c $bname) for role $(C c $brole) already exists"
+      elif [[ $bsane != E ]]; then
+        if [[ ! $pname ]]; then
+          # Simply record this bucket in project config, unless not sane.
+          Say "There is only one bucket in fact labeled" \
+              "'$(C c)$brole$(C)',$LF'$(C c)$bname$(C)', and the global" \
+              "runtime config has no role $(C c $gs_brole) defined."
+          builtin printf -v $gs_brole %s "$bname"
+          psane=$bsane
+          pause=y
+        else
+          Say "There is only one bucket, '$(C c $bname)', in fact labeled" \
+              "$(C c $brole), but${LF}the global runtime config has the" \
+              "role $(C c $gs_brole) pointing to a bucket $(C c $pname)" \
+              "instead.$if_you_answer_no"
+          Confirm "Change role '$(C c)gs_$brole$(C)' to" \
+                  "point to bucket '$(C c)$bname$(C)'"
+          builtin printf -v $gs_brole %s "$bname"
+          psane=$bsane
+
+          if [[ $prole ]]; then
+            Say "Optionally, you can remove the label $(C c $prole)" \
+                "from the bucket $(C c)$pname"
+            Confirm -y "Remove the label" &&
+              gsutil label -d burrmill_role $pname
+          fi
+        fi
+      fi
+      ;;
+    *)
+      pause=y
+      Warn "There must be exactly one bucket in project labeled" \
+           "$(C c)$brole$(C), but $bcnt were found. This is bad"
+      case "$pname%%$psane" in
+        %%*)  Warn "The project's global config does not name any bucket as" \
+                   "role '$(C c)$gs_brole$(C)'" ;;
+        *%%A) Warn "The project's global config bucket role" \
+                   "'$(C c)$gs_brole$(C)' names a nonexisting bucket" \
+                   "'$(C c)$pname$(C)'." ;;
+        *%%*) Warn "The project's global config bucket role" \
+                   "'$(C c)$gs_brole$(C)' names an unabeled bucket" \
+                   "'$(C c)$pname$(C)'." ;;
+      esac
+
+      # Is $pname a $brole bucket in a good standing? 'W' is bad for our
+      # purposes here, just too much mess; allow an impeccable 'K' only.
+      [[ $prole = $brole && $psane = K ]] || _FixYourMess
+      bsane=W  # The sanity status is not well-defined here, really.
+      ;;
+  esac
+
+  # If some parts aren't sane, send the user to fix their problems.
+  [[ $psane = E || $bsane = E ]] && _FixYourMess
+  [[ $pause ]] &&
+    Pause "$(C w)Review the fixes we applied and/or warnings about" \
+          "inconsistencies above.$(C)"$'\n'"Press Enter when done..." || true
+}
+
+[[ ${jsbuckets:-} ]] || jsbuckets=$(GsListBuckets)
+jsbuckets_orig=$jsbuckets   # For tracking changes.
+
+if [[ $jsbuckets ]]; then
+  Say "Current list of buckets in project $(C c $project):"
+  GsPrintBuckets >&2 "$jsbuckets"
+else
+  Say "No storage buckets found in project $project"
+fi
+
+_MakeOrSanityCheckBucket scratch
+jsbuckets=$(GsListBuckets)  # We may have made changes, re-read.
+_MakeOrSanityCheckBucket software
+jsbuckets=$(GsListBuckets)
+
+: ${gs_location:?} ${gs_scratch:?} ${gs_software:?}  # Assert.
+
+# The software bucket is versioned.
+gsutil versioning set on $gs_software
+
+$GCLOUD compute project-info add-metadata --metadata=gs_software=$gs_software
+
+RuntimeConfigVarSet burrmill globals \
+    "gs_location=$gs_location gs_scratch=$gs_scratch gs_software=$gs_software"
+Say "Global runtime config has been set"
+
+if [[ "$jsbuckets" != "$jsbuckets_orig" ]]; then
+  Say "Updated list of buckets in your project $(C c $project):"
+  GsPrintBuckets >&2 "$jsbuckets"
+fi
+
+# But keep $jsbuckets, will need it for registry check.
+unset jsbuckets_orig
+unset -f _BucketSanity _FixYourMess _MakeOrSanityCheckBucket
+
+#==============================================================================#
+# Permission grants. We do not have the registry yet; will do next.
+#==============================================================================#
+SayBold "Granting permissions on storage buckets"
+
+# The imaging account must have full permissions.
+gsutil -q iam ch \
+       serviceAccount:$acz_imager:$ro_bucket_readwrite $gs_software
+
+Say "Permissions on bucket $(C c $gs_software) adjusted"
+
+gsutil -q iam ch \
+       serviceAccount:$acz_imager:$ro_bucket_readwrite $gs_scratch
+
+Say "Permissions on bucket $(C c $gs_scratch) adjusted"
+
+#==============================================================================#
+# Cloud registry setup. Must have functional scratch already!
+#==============================================================================#
+SayBold "Creating or verifying Cloud Registry"
+
+[[ $jsbuckets ]] || jsbuckets=$(GsListBuckets)
+
+gs_registry=gs://${gs_location}.artifacts.${project}.appspot.com
+
+if [[ ! $jsbuckets ]] ||
+     ! jq <<<"$jsbuckets" >/dev/null -e --arg b $gs_registry/ 'has($b)'; then
+
+  Say "Creating Cloud Registry $(C c $gs_registry). Be patient."
+  # The only way to create the bucket is run a build. The 'nil' build pushes a
+  # nearly empty image, and completes in seconds.
+  bm-build -s nil  &>/dev/null ||
+    Die "Dummy build failed. Something is wrong"
+else
+  Say $OK "Registry bucket $(C c $gs_registry) already exists"
+fi
+
+# Turn on UBLA, and grant permissions to accounts.
+project_id=$($GCLOUD projects describe $project --format='get(projectNumber)')
+_ac_cloudbuild=${project_id}@cloudbuild.gserviceaccount.com
+
+# Reset all permission only when turning UBLA on, on a fresh bucket. User might
+# have added permissions to other accouts to share the buiders.
+if ! jq <<<"$jsbuckets" >/dev/null -e --arg b $gs_registry \
+       '.[$b]."Bucket Policy Only enabled"'; then
+  Say "Turning on uniform access policy on the registry bucket"
+  gsutil iam set <(echo '{}') $gs_registry
+  gsutil ubla set on $gs_registry
+fi
+
+Say "Adjusting permissions on the registry and scratch buckets"
+
+gsutil label ch -l burrmill_role:registry $gs_registry
+
+gsutil -q iam ch \
+       serviceAccount:$_ac_cloudbuild:roles/storage.admin    \
+       serviceAccount:$acz_backsvc:roles/storage.admin       \
+       serviceAccount:$acz_imager:roles/storage.objectViewer \
+       serviceAccount:$acc_manage:roles/storage.objectViewer    $gs_registry
+
+gsutil -q iam ch \
+       serviceAccount:$acz_backsvc:roles/storage.admin  \
+       serviceAccount:$_ac_cloudbuild:roles/storage.admin       $gs_scratch
+
+Say "Permissions on buckets adjusted"
+
+jsbuckets=$(GsListBuckets)
+: ${jsbuckets:?}  # Assert. Buckets should exist by now!
+Say "Updated list of buckets in your project $(C c $project):"
+GsPrintBuckets >&2 "$jsbuckets"
+
+unset _ac_cloudbuild gs_registry project_id
+
+#==============================================================================#
+# Deploy repository cleanup function.
+#==============================================================================#
+SayBold "Creating or verifying registry maintenance function"
+
+declare -A funplaces=( [asia]=asia-northeast1
+                       [eu]=europe-west1
+                       [us]=us-central1 )
+
+funver=1  # Bump this to force redeployment on uppgrade.
+topic=cloud-builds
+funname=delete_untagged_images
+do_test=y
+
+# Ensure topic exists. I've seen it not always auto-created.
+[[ $($GCLOUD pubsub topics list --filter="name:$topic" 2>/dev/null) ]] ||
+  $GCLOUD pubsub topics create $topic
+
+# Then find a function, if exists. Since we search by name, there should be only
+# one anyway. If empty, then the function was not found. NB the docs are wrong
+# about the --regions switch: if omitted, all regions are in fact listed, not
+# the default set in user's local config, as stated in the documentation.
+funreg=$($GCLOUD functions list \
+                 --filter="entryPoint=$funname AND \
+                           environmentVariables.VERSION_MARKER=$funver" \
+                 --format='value(name.scope("locations").segment(0))')
+
+if [[ ! $funreg ]]; then
+  funreg=${funplaces[$gs_location]}
+  : ${funreg:?}  # Assert
+  Say "Deploying maintenance function $(C c $funname) in region $(C c $funreg)"
+
+  # First deployment in a project often fails. Must be a bug.
+  for attempt in y ''; do
+    $GCLOUD functions deploy $funname --format=none \
+            --set-env-vars=VERSION_MARKER=$funver \
+            --region=$funreg --no-allow-unauthenticated --trigger-topic=$topic \
+            --source=$BURRMILL_LIB/functions/$funname --runtime=python37 \
+            --memory=128MB  --max-instances=1 --service-account=$acz_backsvc &&
+      break;
+    [[ $attempt ]] && {
+      Say "Failure happens once in a while, retrying deployment"
+      sleep 10; }
+  done ||
+    { do_test=
+      Warn "Function deployment failed. Please run this command again after" \
+           "it completes.${LF}If the failure persists, open an issue with us" \
+           "at https://github.com/burrmill/burrmill/issues${LF}Setup will not" \
+           "abort, as this service is not essential, but the problem must" \
+           "be addressed"
+      Pause; }
+  [[ $do_test ]] && sleep 10  # Let things settle on a successful deployment.
+fi
+
+if [[ $do_test ]]; then
+  Say "Making a test call to function $(C c $funreg/$funname)"
+  for attempt in 1 2 ''; do
+    result=$($GCLOUD functions call $funname \
+                     --region=$funreg --data='{}' --format='get(result)')
+    [[ $result = OK ]] && break
+    # Retry test call in 5 seconds, up to 3 times. This fails for no reason too.
+    [[ $attempt ]] && sleep 5
+  done
+  if [[ $result = OK ]]; then
+    Say $OK "Function smoke test passed"
+  else
+    Warn "Function test failed. Please run this command again after it" \
+         "completes.${LF}If the failure persists, open an issue with us at" \
+         "https://github.com/burrmill/burrmill/issues${LF}Setup will not" \
+         "abort, as this service is not essential, but the problem must" \
+         "be addressed"
+    Pause
+  fi
+fi
+
+unset allregions do_test funname funreg funplaces topic
+
+#==============================================================================#
+# Service accounts,
+#==============================================================================#
+SayBold "Enabling instance guest attributes project-wide"
+
+$GCLOUD compute project-info add-metadata --metadata=enable-guest-attributes=1
+
+#==============================================================================#
+# OS Login.
+#==============================================================================#
+
+SayBold "Checking if OS Login should be enabled"
+
+oslog=$($GCLOUD compute project-info describe \
+                --format='get(commonInstanceMetadata[enable-oslogin])')
+# The whole case returns true if OS Login must be enabled.
+case ${oslog^^} in
+  TRUE|Y*|1) Say $OK "OS Login is already enabled"; false ;;
+  '')  true ;;
+  *) Warn "OS Login is explicitly disabled in project metadata.${LF}This" \
+          "will make working with the cluster difficult, because instances" \
+          "are created${LF}and deleted on demand, and managing SSH keys per" \
+          "instance is impossible."
+     Confirm -y "Enable OS Login" ;;
+esac && {
+  Say "Enabling OS Login for project $project"
+  $GCLOUD compute project-info add-metadata --metadata=enable-oslogin=1; }
+unset oslog
+
+#==============================================================================#
+# Host keys.
+#==============================================================================#
+SayBold "Setting up shared host identity key"
+
+keyfile=ssh_host_ed25519_key
+secret=burrmill-hostkey
+gspubkey=$gs_software/hostkey/$keyfile.pub
+
+# See if the secret exists at all, and is usable:
+# $key unset = ok, likely just the first time creating the key.
+# $key set, $key_ok unset = Nothing will work, must fix.
+# $key_ok is true (implies $key) = secret is ok, but check bucket for public k.
+keyok=
+key=$($GCLOUD beta secrets list --format='get(name)' --filter=name:/$secret)
+# Check if the latest version exists and is usable. Since this is a beta, it's
+# not yet clear what is the latest version. Assume the most recently created?
+[[ $key ]] && keyok=$($GCLOUD beta secrets versions list $secret --limit=1 \
+                              --sort-by=~createTime --format='get(state)')
+[[ $keyok != ENABLED ]] && keyok=
+
+if [[ $key && ! $keyok ]]; then
+  Warn "Host key secret '$(C y $secret)' exists, but is not in a usable state.
+$(C w)BurrMill won't be able to start SSH server$(C), and you won't be able to\
+ ssh into any host. We can fix this
+by generating a new keypair. Manual recovery from this state is highly\
+ discouraged."
+  Confirm -y "Generate new SSH host keys for your Burrmill project" || skipkey=y
+fi
+
+if [[ ${skipkey-} ]]; then
+  Warn "You will have to resolve the secret problem by yourself. You can run" \
+       "this script any later time if you change your mind"
+else
+  if [[ $key && ! $keyok ]]; then
+    Warn "Deleting dysfunctional secret key '$(C y $secret)'"
+    $GCLOUD -q beta secrets delete $secret
+  fi
+
+  if [[ $keyok ]]; then
+    Say $OK "Valid secret SSH host key already exists in the Secrets Manager."
+    # Check if the public key available in the bucket. We don't check if
+    # the public key actually matches the secret key. There is only so much
+    # breakage I can handle...
+    if ! gsutil -q stat $gspubkey; then
+      Warn "Public host key '$(C c $gspubkey)'"$'\n'"is missing, deriving" \
+           "from the secret key."
+      $GCLOUD beta secrets versions access latest --secret=$secret >$keyfile
+      chmod 600 $keyfile
+      pkey=$(ssh-keygen -y -f $keyfile)
+      # This is a hack. ssh-keygen does not have a command to print a comment
+      # encoded inside the private key, but does have one to change the comment
+      # interactively, the '-c' switch. It prints two lines to stdout, like:
+      #     Key now has comment 'comment is here'
+      #     Enter new comment:
+      # and then exists because its input is /dev/null. We parse the first line.
+      # ssh-keygen exits with a non-zero code; this is expected.
+      pcmt=$(ssh-keygen -c -f $keyfile </dev/null |
+               head -1 | perl -lpe "s/^.*?'//;s/'$//") || true
+      rm $keyfile
+      echo "$pkey $pcmt" > $keyfile.pub
+      gsutil cp $keyfile.pub $gspubkey
+      Say $OK "Recovered public key $pcmt"$'\n'"uploaded to $gspubkey"
+    else
+      Say $OK "A public key is already in $gspubkey"
+    fi
+  else
+    Say "Generating a new SSH host key pair"
+    pcmt="[BurrMill host id for project '$project' generated on $(date -Is)]"
+    ssh-keygen -q -t ed25519 -f ./$keyfile -N '' -C "$pcmt"
+
+    $GCLOUD beta secrets create $secret \
+            --replication-policy=automatic --data-file=$keyfile
+    rm $keyfile
+
+    gsutil -q cp $keyfile.pub $gspubkey
+
+    Say "Host key $(C y "$pcmt")"$'\n'"generated and stored as secret" \
+        "'$(C y $secret)'."$'\n'"A matching public key has been uploaded" \
+        "to $(C c $gspubkey)"
+  fi
+
+  Say "Verifying and/or adjusting permissions on secret '$secret'"
+  rm -f *
+  y2j > addbinds.json <<EOF
+- members:
+  - serviceAccount:$acc_compute
+  - serviceAccount:$acc_control
+  - serviceAccount:$acc_manage
+  role: roles/secretmanager.secretAccessor
+EOF
+  $GCLOUD beta secrets get-iam-policy $secret --format=json >basepol.json
+  jq '.bindings += input' basepol.json addbinds.json >newpol.json
+  $GCLOUD beta secrets set-iam-policy $secret newpol.json --format=none
+fi
+
+rm -f *
+
+unset gspubkey key keyfile keyok newkey pcmt pkey secret skipkey
+
+#==============================================================================#
+
+SayBold "Project setup completed successfully"
+exit 0
+
+#==============================================================================#

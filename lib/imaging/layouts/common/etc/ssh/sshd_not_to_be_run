@@ -1,0 +1,2 @@
+# This file is deleted at the end of imaging stage 2.
+# /lib/systemd/system/ssh.service startup is conditioned on this file.

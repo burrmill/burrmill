@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# This is part of BurrMill maintainer scrips in the same directory. It is used
+# only for local testing of the cxx builder, *not* Cloud Build.
+
+FROM debian:buster-slim
+ARG gid
+ARG group
+ARG uid
+ARG user
+CMD []
+ENTRYPOINT ["/sbin/image-entrypoint"]
+WORKDIR /root
+COPY --chown=0:0 /fsroot /
+RUN apt-get -qq update -y && apt-get -qq install -y bash-completion sudo
+COPY setup.sh .
+RUN ./setup.sh -x && rm ./setup.sh
+
+# Bake in user id as late as possible, so that the previuos layer can be shared.
+RUN set -eux; \
+    groupadd -g $gid $group; \
+    useradd -m -u $uid -g $gid -G sudo --skel /dev/null \
+            -d /home/$user -s /bin/bash $user
+
+#==== Forgotten stuff goes here (no root later) ====
+
+# Uncomment lines and add packages while debugging the image locally; this
+# avoids full image rebuild. Then, when ready, move missed packages to the
+# relevant section of files and comment them again.
+
+# This is for local only, like sudo. Move to RUN apt line above a full rebuild.
+#RUN apt-get -qq install -y ...
+
+# This is for main course. Add to setup.sh before a full image rebuild.
+#RUN apt-get -qq install -y ...
+
+USER $user:$group
+WORKDIR /home/$user

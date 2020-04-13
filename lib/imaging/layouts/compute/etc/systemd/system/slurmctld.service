@@ -1,0 +1,31 @@
+# -*- mode: conf -*-
+# This file was installed by BurrMill.
+
+[Unit]
+Description=Slurm controller service
+Documentation=man:slurmctld(8)
+Wants=munge.service network-online.target
+After=network-online.target
+After=burrmill-environment.target
+
+# Start on controllers only.
+ConditionHost=*-control*
+
+[Service]
+Type=forking
+EnvironmentFile=-/etc/default/slurm
+User=slurm
+RuntimeDirectory=slurmctl
+StateDirectory=slurmctl
+ExecStartPre=+/usr/local/sbin/slurm_prestart_config slurmctld
+ExecStart=/opt/slurm/sbin/slurmctld $SLURMCTLD_OPTIONS
+ExecStartPost=/usr/local/sbin/slurm_poststart_config slurmctld
+ExecReload=+/usr/local/sbin/slurm_prestart_config slurmctld
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/run/slurmctl/slurmctld.pid
+Restart=on-failure
+RestartSec=2.5s
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# Add CUDA and MKL drone images to the cxx builder to build Kaldi with.  This
+# file lives in a subdirectory to avoid maintaining a .dockerignore file,
+# because all files in the base directory are belong to Kaldi, not its builder;
+# the builder itself has no context.
+
+ARG registry
+ARG _MKL_VER
+ARG _CUDA_VER
+
+FROM $registry/mkl:$_MKL_VER   as mkl
+FROM $registry/cuda:$_CUDA_VER as cuda
+FROM $registry/cxx
+COPY --from=mkl   /opt /opt
+COPY --from=cuda  /opt /opt

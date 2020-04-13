@@ -1,0 +1,9 @@
+# This file is not strictly required. When it is absent, 'gcloud build submit'
+# will use the contents of .gitignore file when present (and it is). However,
+# it prints a long-winded and somewhat confusing message about "some" files
+# not being sent for build, directing to a log that may or may not exist.
+# We suggest using this exact file in any build directory that contains a
+# .gitignore file, the only purpose being is to suppress the warning.
+
+.gitignore
+#!include:.gitignore

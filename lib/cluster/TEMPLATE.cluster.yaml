@@ -1,0 +1,176 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2019 Kirill 'kkm' Katsnelson
+#
+# MEMO FROM THE DEPT. OF GOOD IDEAS
+# =================================
+#
+# If you did not open this file by following the directions in the BurrMill 101
+# crash course at http://100d.space/burrmill-101, closing it now and starting
+# from that link is a Very Good Idea.
+#
+# CONFIGURED PARTS
+# ================
+#
+# 1. Name of the cluster. Come up with simple system of short codenames to be
+#    able to match all cluster hostnames in SSH selector expressions, akin to
+#    shell wildcards.  A good scheme is 'x' or 'q' followed by one or two (but
+#    settle on either one or two!) alphanumerics, so you can use e.g. q?-* or
+#    x??-* to match any hostname unambiguously.
+#      Ref: https://100d.space/p/burrmill/609#2naming
+#      Ref: 'man ssh_config', search for /^PATTERNS/
+#
+# 2. Zone to place the cluster.
+#    Must be in your selected multiregion (us/eu/asia). You must have enough
+#    quota in the parent region of the zone.
+#      Ref: https://100d.space/p/burrmill/220 (covers all concepts)
+#      Ref: https://100d.space/p/burrmill/486#calc-quota (calculate quota)
+#      Ref: https://100d.space/p/burrmill/486#req-quota (request quota)
+#      Ref: https://100d.space/gce-by-zone (resources by zone)
+#
+# 3. Shared storage size and NFS server vCPU count and RAM size.
+#    This is likely the most important parameters to get right.
+#      Ref: https://100d.space/p/burrmill/609#2nfs (detailed)
+#      Ref: https://100d.space/p/burrmill/609##3nfspreset (starting points)
+#      Ref:
+# https://cloud.google.com/compute/docs/disks/performance#size_price_performance
+#
+# 4. Slurm node and partitions.
+#    Shape, size, count and grouping of compute nodes.
+#      Ref: https://100d.space/p/burrmill/609#2compute
+#
+#
+# GCE vCPU IS A HYPERTHREAD (1/2 CPU); 64+ vCPU TOPOLOGY
+# ======================================================
+#
+# GCE vCPU equals 1 hyperthread, not one full CPU. GCE guarantees that each full
+# core is available to a VM (so the number of vCPUs is always even on larger
+# machines). We allocate 2 vCPUs per CPU-intensive computation, so always use 2
+# threads/core. Also, up to and including 64, all vCPU share one "socket", i.e.
+# pretend to be one multi-core chip. Above 64 vCPUs, it gets more interesting:
+# there are 2 sockets, and the vCPUs are divided equally between them, so that
+# the number of cores above 64 must be divisible by 4. (128-vCPU machines do not
+# exist; the largest, 96-vCPU ones still have 2 sockets). 'slurmd -C' would
+# complain and print a nonsensical configuration otherwise. From the Slurm
+# perspective, a 68-vCPU machine has 2 sockets, 17 cores each, and Slurm won't
+# be able to use a 70-vCPU one at all.
+#
+# TL;DR: 1 socket for 64 vCPU and fewer, 2 sockets for 68+ vCPU. 2 to 64 vCPU
+# machines must have an even number of vCPUs; above 64 must be a multiple of 4.
+#
+# If you do not specify the DEFAULT node spec, 'Sockets=1 ThreadsPerCore=2' is
+# automatically added. Also, 'State=CLOUD' is always set, even if you try to
+# specify it with a different value. Usually, you do not need to specify the
+# Slurm's DEFAULT pseudo-node, we create sensible setting automatically.
+
+---
+name: ADD_CLUSTER_NAME
+zone: ADD_ZONE_e.g._us-central1-c
+backup: NO         # TODO(kkm): Still undecided. Do not touch yet.
+# The default sizing is "M" (https://100d.space/p/burrmill/609##3nfspreset).
+size:
+  shared_disk: 1280
+  filer: e2-highmem-8
+  login: e2-standard-2
+
+# The node definitions contribute to both slurm.conf and the GCE flag files
+# corresponding to each node type. Make very sure that the CPU counts match.
+# You can see the generated slurm.conf if you add -d1 to 'bm-deploy new' or
+# 'bm-configure' commands.
+
+nodes:
+  # By default, only n2 and p100 nodes are enabled. Customize.
+  #
+  # CPU-only nodes.
+  # 480 vCPU defined in each template. You'd use only one, likely.
+  #
+  # N1 or N2 node: 5 CPU (10 vCPU), 15GB. 480 vCPUs total.
+  # The number of 5 CPU seems odd, but from my experiments 5 CPU worked for the
+  # best resource use. During the GPU training, there are up to 5 processes
+  # doing the averaging and progress reporting, so this VM size seems optimal
+  # for this long phase (1 CPU-only node is kept alive and fully utilized).
+  #
+  # C2 come in predefined shapes only. c2-standard-4 (2CPU, 16GB) looks optimal.
+  #
+  # NB: Optimize the i-vector extractor training according to node shape: on C2,
+  #     use 4 threads and allocate whole node per task. For get_egs, read
+  #     comments in tools/kaldi/example.slurm.pl.conf. Other steps are less
+  #     sensitive to the shape.
+
+  # Note the way you can "comment out" a configuration by prepending '//' to its
+  # ID. This is not a YAML feature; this is just a normal dict object with the
+  # key '//n1'. These "comments" are handled in our scripts. Spaces after the
+  # "//" are allowed. Be mindful of alignment though when using this feature;
+  # YAML is indent-controlled, just like Python. These keys, "commented-out" or
+  # not, must have 2 spaces before them.
+  //n1:
+    Count: 48
+    CoresPerSocket: 5
+    RealMemory: 15000
+    Gres: gcecpu:n1:no_consume
+    GCE:
+      machine-type: n1-custom-10-15360
+      min-cpu-platform: Intel Skylake
+
+  n2:
+    Count: 48
+    CoresPerSocket: 5
+    RealMemory: 15000
+    Gres: gcecpu:n2:no_consume
+    GCE:
+      machine-type: n2-custom-10-15360
+
+  //c2:
+    Count: 240
+    CoresPerSocket: 2
+    RealMemory: 16000
+    Gres: gcecpu:c2:no_consume
+    GCE:
+      machine-type: c2-standard-4
+
+  # GPU nodes, 2 CPU (4 vCPU), 6GB, 1 GPU. Total 96 vCPUs, 24 GPUs of a kind.
+  # Note that V100 is not cost-efficient, but about 25% faster, so if time is
+  # more concern than money, you can go with it, too. T4 are not bad for smaller
+  # jobs, given the price!
+
+  p100:
+    Count: 24
+    CoresPerSocket: 2
+    RealMemory: 5960
+    Gres: cuda:p100:1
+    GCE:
+      machine-type: n1-custom-4-6144
+      accelerator: type=nvidia-tesla-p100,count=1
+
+  //v100:
+    Count: 24
+    CoresPerSocket: 2
+    RealMemory: 5960
+    Gres: cuda:v100:1
+    GCE:
+      machine-type: n1-custom-4-6144
+      accelerator: type=nvidia-tesla-v100,count=1
+
+  //t4:
+    Count: 24
+    CoresPerSocket: 2
+    RealMemory: 5960
+    Gres: cuda:t4:1
+    GCE:
+      machine-type: n1-custom-4-6144
+      accelerator: type=nvidia-tesla-t4,count=1
+
+# Slurm partitions are like job queues in other systems. If you do not specify
+# nodes, we automatically add nodes with the same key to them. Below, the
+# partition 'std' implicitly gets 'Nodes: [ std ]'. For advanced usage, if you
+# want partition without nodes, use just 'Nodes:' without any value. 'Nodes:
+# ALL' has the same meaning as in slurm.conf. In addition, all Slurm partition
+# configuration keywords are understood; see 'man slurm.conf'.
+#
+# It's not obligatory to have the default partition; slurm.pl configuration in
+# Kaldi allows for selecting the default too.
+partitions:
+  std:
+    Default: YES
+    Nodes: [ n1, n2, c2 ]
+  gpu:
+    Nodes: [ p100, t4, v100 ]

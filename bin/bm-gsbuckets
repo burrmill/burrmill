@@ -1,0 +1,8 @@
+#!/bin/bash
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+source common.inc.sh
+
+Warn "This is a temporary plug, going away pending a better tool, bm-storage."
+
+GsPrintBuckets >&2

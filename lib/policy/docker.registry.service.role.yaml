@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+stage: GA
+title: BurrMill Docker Registry Background Service
+description: Permissions to locate and delete unlabeled Docker images.
+includedPermissions:
+- resourcemanager.projects.get
+- runtimeconfig.variables.get

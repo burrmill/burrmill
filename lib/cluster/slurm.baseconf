@@ -1,0 +1,131 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# This configuration is nearly unchangeable, but if you want, you may copy it
+# over to etc/cluster directory, and that one will be picked up over the
+# file in lib/cluster. Nodes and partitions are appended to it
+
+ClusterName=$CLUSTER
+SlurmctldHost=$CLUSTER-control
+SlurmctldPort=7002
+SlurmctldDebug=verbose
+SlurmUser=slurm
+SlurmctldPidFile=/run/slurmctl/slurmctld.pid
+StateSaveLocation=/var/lib/slurmctl/slurm.state
+
+SlurmdDebug=verbose
+SlurmdPort=7001
+SlurmdUser=root
+SlurmdPidFile=/run/slurm/slurmd.pid
+SlurmdSpoolDir=/var/spool/slurm
+LaunchParameters=slurmstepd_memlock_all
+
+# Generalized node resources. Do not use name 'gpu' for GPU, to keep it simple:
+# we always have 1 GPU per node, and these nodes are identical. Slurm's plugin
+# gres_gpu gets in the way more than helps in such a simple setup.
+#
+# gcecpu is for selecting the platform, like N1, N2, C2. These must be defined
+# as 'no_consume'.
+#
+# 'shuffler' is reserved for future use, for shuffling the training egs.
+# This is WIP.
+GresTypes=cuda,gcecpu,shuffler
+
+## DEBUG
+##DebugFlags=CPU_Bind,Gres,Power,PowerSave,SelectType,Steps
+##DebugFlags=PowerSave,Backfill,TraceJobs,Agent
+
+# Security and accounting (none of either). The recommended munge security is a
+# win in a multiuser cluster, but causes AuthInfo waiting for cred renewal and
+# expiration up to 3 minutes. This is not good at all if we want the highest
+# throughput of small jobs, especially when preemption happens. In GCP, if you
+# really want access controls, it's better to make multiple projects with
+# different access control, and leave Slurm running without any security at all.
+#
+# As for the accounting storage, GCP offers MySql in the cloud, if you really
+# need that. In our case, I did not need any, relying on Kaldi logging.
+# Nevertheless, Slurm's database interface is sweet and easy, if you want it.
+AuthType=auth/none
+CredType=cred/none
+AccountingStorageType=accounting_storage/none
+
+# A requeued job (this happens on node failure, i.e. preemption) cannot restart
+# until expire, even if auth/none. 5s is the hardcoded minimum allowed,
+# unfortunately. I could have attempted to patch it to a smaller value, but this
+# is risky, since some other moving parts can enter an unexpected race. So let's
+# leave this at 5 seconds for now. It has proven stable.
+AuthInfo=cred_expire=5
+
+# GCE does not even allow SMTP traffic anyway. Using Stackdriver monitoring is
+# the way to do it.
+MailProg=/bin/true
+
+# Important for cloud. Basically, do not assume the nodes will retain their IP
+# addresses, and do not cache name to IP mapping anywhere.
+CommunicationParameters=NoAddrCache
+SlurmctldParameters=cloud_dns,idle_on_node_suspend
+PrivateData=cloud   # Always show cloud nodes.
+
+# Cloud Networking: flat topology, communicate to nodes directly.
+SwitchType=switch/none
+RoutePlugin=route/default
+TopologyPlugin=topology/none
+TreeWidth=65500
+
+RebootProgram="/bin/systemctl reboot --no-wall"
+
+MaxArraySize=2000
+MaxJobCount=50000  # Active, and completed until MinJobAge'd out.
+MinJobAge=600      # How long to keep completed job info in controller's RAM.
+FirstJobId=100
+MaxJobId=99999
+
+PropagatePrioProcess=2    # Nicest of (sbatch, slurmstepd + 1)
+#CompleteWait=1           # Launch next job quickly.
+KillWait=10               # GCE gives only 30s to stop.
+UnkillableStepTimeout=15  # The node has stopped, really.
+
+# Comm timeouts. Keep small, GCE is very reliable. The worst is a machine
+# maintenance move, and that's still below 1s in any case I observed. 5 times
+# that will take care of the unobserved long tail for any practical case.
+MessageTimeout=5
+SlurmdTimeout=5
+
+# Under very heavy load and when a node is preempted, some jobs just disappear
+# without trace and sit in failed state permanently. The default 10s appears not
+# enough. The 30s timeout seems to do the job.
+BatchStartTimeout=30
+
+# Scheduling.
+FastSchedule=1
+SchedulerType=sched/backfill
+SchedulerParameters=salloc_wait_nodes,batch_sched_delay=0,bf_continue,bf_interval=60,bf_yield_interval=1000000,sched_interval=10,sched_min_interval=100000,max_rpc_cnt=160
+SelectType=select/cons_res
+SelectTypeParameters=CR_Core,CR_ONE_TASK_PER_CORE,CR_Pack_Nodes
+
+# Resource tracking.
+TaskPlugin=task/affinity,task/cgroup
+ProctrackType=proctrack/cgroup
+JobAcctGatherType=jobacct_gather/none
+JobCompType=jobcomp/none
+
+# Node control and timeouts. Note there is also a global node down trigger
+# installed on the controller to return a preempted GCE node to idle state.
+SuspendProgram=$BURRMILL_SBIN/slurm_suspend.sh
+ResumeProgram=$BURRMILL_SBIN/slurm_resume.sh
+ResumeFailProgram=$BURRMILL_SBIN/slurm_suspend.sh
+
+SuspendTimeout=90   # Seen in the wild: 65s.
+ResumeTimeout=240   # Seen: 200s and still successfully booted.
+ResumeRate=60       # Avoid exceeding GCE request rate limit.
+SuspendRate=60      #
+SuspendTime=360     # Kill idle nodes after 6 minutes.
+ReturnToService=2   # When a DOWN node boots, it becomes available.
+
+# This file is appended to with node and partition configuration using the specs
+# from the configuration YAML file, a single source of truth for both Slurm and
+# GCE w.r.t. node CPU count, memory size, accelerators etc.
+#
+# The $-vars are substituted when the configuration is packaged by bm-deploy.
+# Empty lines and comments are stripped except those starting with '##'.

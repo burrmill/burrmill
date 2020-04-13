@@ -1,0 +1,35 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# This one-shot service installs Slurm configuration on machines other than
+# control and compute nodes. It is principally important to have the matching
+# config on a login node, as this is where the jobs are submitted from.
+# Reloading or restarting this service (no difference) causes unconditional
+# refresh of configuration from metadata.
+#
+# The Slurm control and compute nodes use the same script, but invoke it at
+# strategically important points (right before start or reload); this is just a
+# simple service to make sure the configuration is present and fresh after boot
+# for interactive use.
+
+[Unit]
+Description=Slurm configuration pull service for non-Slurm nodes
+Wants=network-online.target
+After=network-online.target
+After=burrmill-environment.target
+
+# Start on non-Slurm nodes only.
+ConditionHost=!*-control*
+ConditionHost=!*-node-*
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/slurm_prestart_config other
+ExecReload=/usr/local/sbin/slurm_prestart_config other
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# This is part of BurrMill maintainer scrips in the same directory. It is used
+# only for local testing of the cxx builder with added cuda and mkl images.
+# It is never used with Cloud Build.
+
+ARG project_repo
+ARG user
+ARG _MKL_VER=2019.5
+ARG _CUDA_VER=10.1.2
+
+FROM $project_repo/mkl:$_MKL_VER   as mkl
+FROM $project_repo/cuda:$_CUDA_VER as cuda
+FROM local-cxx-$user
+COPY --from=mkl   /opt /opt
+COPY --from=cuda  /opt /opt

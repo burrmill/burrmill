@@ -1,0 +1,30 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+# This is invoked from /etc/opt-postmount.service as soon as the CNS opt mount
+# becomes available. The program has its environment set by systemd, and this is
+# exactly what we need to modify. The environment is then modified by sourcing
+# /etc/profile.d/cnsdisk.sh, just like the user unvironment is, but with a magic
+# override variable set to load a different file, and then put back into systemd
+# unit environment block.
+#
+# The ld.so loader cache is also refreshed: /etc/ld.so.conf.d/burrmill_cns.conf
+# indirectly includes all deployed /opt/etc/ld.so.conf.d/*.conf files.
+
+# This is invoked as a systemd unit, thus starts with the current systemd unit
+# environment.
+
+set -eu
+
+# Process CNS disk system environment variables.
+__opt_etc_environment_override=/opt/etc/sysenvironment
+. /etc/profile.d/burrmill_cnsdisk.sh
+
+# Then put environment back in.
+/bin/systemctl import-environment
+
+# Refresh loader cache.
+/sbin/ldconfig

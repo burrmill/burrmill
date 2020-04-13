@@ -1,0 +1,1161 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# This tool manages cluster deployments: initial deployment of cluster machines,
+# changing Slurm and node configuration, and deployment of reimaged boot disks.
+#
+# This is an interactive program, not intended for scripting.
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+source common.inc.sh
+source parseopt.inc.sh
+source cluster.inc.sh
+
+shopt -s extglob
+set -euo pipefail
+
+RequireInteractive
+
+# gcloud filter selecting CNS disks and images.
+readonly base_filter='labels.burrmill:* AND labels.disklabel=burrmill_cns'
+
+GCI="$GC instances"
+
+# Options common to all programs.
+argp_common_options="
+ Common options:
+d,debug?N            print verbose messages; the larger the N, the merrier.
+y,yes!               skip confirmation of less important actions.
+"
+
+#==============================================================================#
+# ParseClusterConfig, LoadClusterConfig: Cluster spec file processing
+#==============================================================================#
+
+# Another approach is to write a jq program into its own file, and return
+# processed JSON augmented with arrays of warnings and/or errors; this way the
+# whole thing could be done in just one jq invocation. This is not slow; but
+# .jq files allow comments, have an emacs mode etc. It's better. But for now,
+# I just frankensteined this parser mixing jq and bash.
+
+# Load, verify, analyze cluster definition and return in the form easy to
+# process into the slurm.conf et amici.
+ParseClusterConfig() {
+  local jdef badnames
+
+  # Rename .partitions to .pars on load, just to save me a bit of typing.
+  jdef=$(y2j "${1?}" | $JQ '. + {pars: .partitions?} | del(.partitions)')
+  Dbg2 "Loaded '$1':"$'\n'"$jdef"
+
+  # Basic sanity checks. Make sure all required keys present and are non-empty.
+  JqTest "$jdef" '
+      all(.nodes, .pars, .size; length > 0 and type == "object") and
+      all(.name, .zone, (.size | .login, .filer, (.shared_disk | tostring));
+          length > 0 and type == "string")' ||
+    Die "One or more of the required configuration values: cluster ID, zone,"\
+        "size, nodes and/or${LF}partition definitions are missing, or the"\
+        "file is otherwise malformed."
+
+  # We don't care about the order, but Slurm does, do this may be a source of
+  # error if the user is familiar with Slurm, where the DEFAULT applies to
+  # everything following it and up to the next DEFAULT (we don't allow that,
+  # but the user is probably unaware of this).
+  JqTest "$jdef" '.nodes | keys_unsorted | (index("DEFAULT") // 0) == 0' ||
+    Die "'$(C c DEFAULT)', if used, must be the first node definition"
+
+  # Verify that nodes and partitions have GCE-compatible name, but even more
+  # restricted: no dashes or underscores, this will confuse our scripts.
+  badnames=$(Jq -r "$jdef" '
+    .nodes | [ keys[] | sub("//\\s*";"")
+                      | select(. != "DEFAULT" and test("[^0-9a-z]")) ]
+           | unique | join(", ")')
+  [[ $badnames ]] &&
+    Die "Node names not following the [a-z0-9] pattern: $(C c)$badnames"
+
+  badnames=$(Jq -r "$jdef" '
+    .pars  | [keys[] | sub("//\\s*";"") | select(test("[^0-9a-z]"))]
+           | unique | join(", ")')
+  [[ $badnames ]] &&
+    Die "Partition names not following the [a-z0-9] pattern: $(C c)$badnames"
+
+  # Check for empty configuration.
+  JqTest "$jdef" '.nodes | del(.DEFAULT) | keys | all(startswith("//"))' &&
+    Die "All node definitions are commented out with the '$(C c //)'"
+  JqTest "$jdef" '.pars | keys | all(startswith("//"))' &&
+    Die "All partition definitions are commented out with the '$(C c //)'"
+
+  # In Slurm, Nodes=ALL cannot be combined with names, it's a wildcard.
+  badnames=$(Jq -r "$jdef" '
+    .pars | to_entries
+          | map( select( .value.Nodes
+                         | type == "array" and
+                           (unique | length > 1 and any(. == "ALL")) )
+                         | .key | sub("//\\s+"; "//") )
+          | join(", ")')
+  [[ $badnames ]] &&
+    Die "The wildcard node specification ALL used with other nodes" \
+        "in partition definition(s): $(C c)$badnames"
+
+  # Now drop all commented out partitions, yet leave commented out nodes: still
+  # want to distinguish erroneously referenced nodes that do not exist at all
+  # from those that are only commented out. This eg should be handled gracefully
+  # by dropping t4 node class from partition, making the commenting out of node
+  # type a single source of truth.
+  #
+  # nodes:
+  #   p100: ...
+  #   // t4: ...
+  # partitions:
+  #   gpu:
+  #     Nodes: [ p100, t4 ]
+  #
+  # Apply the syntax simplification, when omitting Nodes: from partition means
+  # include nodes of the same class as partition name, and normalize all Nodes
+  # in partitions to arrays:
+  #   'std: null'            to 'std:{Nodes:[std]}', auto-naming of nodes.
+  #   'std: { }'             to 'std:{Nodes:[std]}', same.
+  #   'std: {Nodes:null}     to 'std:{Nodes:[]}',    explicit empty partition.
+  #   'std: {Nodes:[]}       to 'std:{Nodes:[]}',    unchanged, explicit empty.
+  #   'std: {Nodes:foo}      to 'std:{Nodes:[foo]}'  coerce string to 1-array.
+  #   'std: {Nodes:[foo]}    to 'std:{Nodes:[foo]}', unchanged.
+  #   'std: {Nodes:[a,a,b]}  to 'std:{Nodes:[a,b]}', deduplicated.
+  # and mark whether the set had nodes defined initially, as we'll remove the
+  # node classes, but warn only if the set of nodes becomes empty as the result
+  # of commenting out all node classes (i.e., not the user's defined empty
+  # partition, which is ok, but one that was gutted out by commenting out node
+  # classes. This is also fine, but just in case warn the user.
+  #
+  # jq tip: distinguish missing key from null key value. When objects are
+  # "added" with the '+', the value of each key on the right wins, even if null.
+  # {Nodes:.key} + .value thus overrides the (only) key Nodes of the left
+  # operand iff value has the key, null-valued or not. The .value.Nodes //= x
+  # construct doesn't distinguish missing and null-valued .Nodes.
+  #
+  # Lastly, put the Slurm DEFAULT pseudo-node aside, as it's not like the
+  # others, provide the defaults and discard State if explicitly set; we'll emit
+  # 'State=CLOUD' always, for the machinery to work correctly; no other State
+  # is allowed, unlike a hardware cluster.
+  jdef=$(Jq  "$jdef" '
+    .pars |= with_entries(select(.key|startswith("//")|not)) |
+    .pars |= with_entries( .value = {Nodes:.key} + .value
+                         | .value.Nodes//=[]
+                         | .value.Nodes |= ([.]|flatten|unique)
+                         | .value._hadnodes = (.value.Nodes | length > 0) ) |
+    .defnode = {Sockets:1, ThreadsPerCore:2} + (.nodes.DEFAULT? | del(.State)) |
+    .nodes |= del(.DEFAULT) ')
+
+  # Find all node names that are in .pars.Nodes but not in .nodes, including the
+  # commented-out ones. Make sure not to yell at the node wildcard "ALL". This
+  # produces a message "badnames" like 'partition x:[y]; partition w:[u,v]'
+  #
+  # jq tip: subtraction '-' of arrays is the set difference operation.
+  badnames=$(Jq -r "$jdef" '
+    (.nodes | keys | map(sub("^//\\s*"; "")) | unique + ["ALL"]) as $knodes |
+    .pars | to_entries
+          | map( .value |= .Nodes - $knodes
+               | select(.value | length > 0)
+               | .value |= join(", ")
+               | "partition \(.key):[\(.value)]" )
+          | join("; ")')
+  [[ $badnames ]] &&
+    Die "References to non-existing node class: $(C c)$badnames"
+
+  # Now drop commented nodes and references to them from partitions. jq idiom
+  # for set intersection is expressed via set difference: x-(x-y).
+  #
+  # Then compute node name expression for Slurm, 'xyz' ->
+  # $CLUSTER-node-std-[1-9], with the key "0NodeName" so that it sorts first,
+  # because it goes first in the Slurm config line. If Count of a node class is
+  # 1 or missing, use the suffix '-1', otherwise '-[1-N]'. We need to guarantee
+  # the minuses separate $cluster-node-$class-$number.
+  #
+  # Apply GCE defaults, if present, from the default node, and rename the key
+  # '_GCE'; we will ignore all '_'-prefixed keys when generating Slurm config
+  # lines.  Then generate names for partitions in the same way, just equal to
+  # their keys, and convert their node reference arrays to strings also ready to
+  # go to the final config. Do the same numeric prefix trick with
+  # '0PartitionName' and its '1Nodes', so these two fields go into the generated
+  # file the first. Partition name must be the first, and Nodes following it
+  # always are just for readability.
+  jdef=$(Jq "$jdef" '
+    .nodes |= with_entries(select(.key | startswith("//") | not)) |
+    (.nodes | keys + ["ALL"]) as $knodes |
+    .pars |= with_entries(.value.Nodes -= .value.Nodes - $knodes) |
+    (.defnode.GCE? // {}) as $gcedef |
+    .nodes |= with_entries( .value._GCE = $gcedef + .value.GCE // {}
+                         | (.value.Count? // 1 | tostring |
+                            if . == "1" then . else "[1-\(.)]" end) as $c
+                         | .value."0NodeName" = "$CLUSTER-node-\(.key)-\($c)"
+                         | .value |= del(.Count,.GCE)
+                         | .value |= (to_entries|sort_by(.key)|from_entries) ) |
+    (.nodes + {"ALL": {"0NodeName": "ALL"}}) as $n |
+    .pars |= with_entries( .value."1Nodes" = ( .value.Nodes
+                                             | map(. = $n[.]."0NodeName")
+                                             | join(",") )
+                         | .value."0PartitionName" = .key
+                         | .value |= (to_entries|sort_by(.key)|from_entries) )')
+
+  # Warn about partitions that had nodes previously declared, but have them no
+  # more because of commenting out nodes.
+  badnames=$(Jq -r "$jdef" '
+    .pars | to_entries
+          | map(select(.value | (."1Nodes" == "" and ._hadnodes)) | .key)
+          | join(", ") ')
+  [[ $badnames ]] &&
+    Warn "There are partition(s) that have all their nodes commented out:" \
+         "$(C c)$badnames$(C).${LF}This is allowed, just be aware of this."
+
+  # Warn about explicitly empty partitions.
+  badnames=$(Jq -r "$jdef" '
+    .pars | to_entries
+          | map(select(.value._hadnodes | not) | .key)
+          | join(", ") ')
+  [[ $badnames ]] &&
+    Warn "There are partition(s) with explicitly no nodes:" \
+         "$(C c)$badnames$(C).${LF}This is allowed, just be aware of this."
+
+  # Not really sure if nodes not assigned to any partition is fatal or not. I
+  # have never had a reason to do that. The user is presumably inexperienced and
+  # already inundated with information. Better play safe and make this an error?
+  badnames=$(Jq -r "$jdef" '
+    ([.pars[].Nodes] | add | unique) as $inpars |
+    ($inpars | index("ALL")) // (.nodes | keys - $inpars)
+                                | arrays | join(", ")')
+  [[ $badnames ]] &&
+    Warn "$(C y)There are node class(es) not assigned to any partition:" \
+         "$(C c)$badnames$(C).${LF}This is most likely a configuration error."
+
+  # It is an error to not specify at least the machine-type for the node. Do not
+  # rely on the default: it's n1-standard-1, way too small for computing.
+  badnames=$(Jq -r "$jdef" '
+    .nodes | to_entries
+           | map(select(.value._GCE."machine-type"? | length == 0) | .key)
+           | join(", ") ')
+  [[ $badnames ]] &&
+    Die "Node class(es) missing their GCE.machine-type:"\
+        "'$(C c)$badnames$(C)'.${LF}This is an error, because there is no" \
+        "sensible default machine-type"
+
+  # Can finally drop .Nodes from partition definitions now.
+  jdef=$(Jq "$jdef" '.pars |= with_entries(.value |= del(.Nodes)) |
+                     .defnode += {"0NodeName":"DEFAULT", "1State":"CLOUD"}')
+  Dbg2 $'Final config\n'"$jdef"
+  echo "$jdef"
+}
+
+# This is for normal loading; fixup does not call this.
+LoadClusterConfig() {
+  local cname descfile jconf
+  local cluster=${1?}
+  # I never had any reason no store the config anywhere else. Besides, it's too
+  # tightly coupled to the Slurm templates. The commit ID we assign to and store
+  # with the configuration refers to the latest one changing any of these files.
+  [[ $cluster =~ [/.] ]] &&
+    Die "Cluster definition must be the cluster ID only, not its filename"
+  descfile="$BURRMILL_ETC/cluster/${cluster}.cluster.yaml"
+  [[ -f $descfile ]] ||
+    Die "Cluster definition file '$(C c)$descfile$(C)' was not found.${LF}If" \
+        "you are trying to recover a broken deployment, use the $(C c)'$my0" \
+        "fix'$(C) command instead."
+
+  Say "Reading configuration from $descfile"
+  # Load and parse the config.yaml, mainly to make sure it makes a Slurm sense.
+  jconf=$(ParseClusterConfig "$descfile")
+
+  cname=$(Jq -r "$jconf" '.name')
+  [[ $cluster = $cname ]] ||
+    Die "File '$(C c)$descfile$(C)' for cluster '$(C c)$cluster$(C)' names" \
+        "the cluster '$(C c)$cname$(C)'. The filename must${LF}match" \
+        "the cluster name. Please fix the file and run this command again."
+
+  echo "$jconf"
+}
+
+#==============================================================================#
+# WriteSlurmConfig
+#==============================================================================#
+# Build and deploy Slurm config from cluster description:
+#
+# WSC [ -r <rev> ] [ -j <json-desc> ] <cluster>
+# -j may optionally provide an already parsed config. The caller promises to
+#    provide a correct one. Never in fact used with -r internally.
+# -r take the config as it was at Git revision. The default is the worktree.
+#
+# The whole function is wrapped into a subshell to respect caller's traps.
+# No need for local because of this.
+WriteSlurmConfig() (
+  set -euo pipefail
+  local jdef= rev=
+  OPTIND=1  # Must be reset, init is per-shell.
+  while getopts "j:r:" opt; do
+    case $opt in
+      j) jdef=$OPTARG ;;
+      r) rev=$OPTARG  ;;
+      *) Die "$my0:$FUNCNAME:$LINENO:internal error:unrecognized switch '-$opt'"
+    esac
+  done; shift $((OPTIND - 1)); unset opt
+  cluster=${1?}
+
+  export GIT_PAGER=
+
+  local etcdir=etc/cluster libdir=lib/cluster
+  local slurmbase=$etcdir/slurm.baseconf  # slurm.conf template to append to.
+  [[ -f $slurmbase ]] || slurmbase=$libdir/slurm.baseconf
+  local conffile=$etcdir/${cluster}.cluster.yaml
+  local slurmconf_metakey=${cluster}_slurm_config  # Metadatum key.
+
+  local tempdir=$(mktemp -d)
+  trap "cd / ; rm -rf $tempdir" ERR EXIT
+
+  # Part 1: tarball required files, with PWD in BurrMill root.
+  cd $BURRMILL_ROOT
+
+  local dirty= n real_rev
+
+  if [[ $rev ]]; then
+    # Deploying from revision $rev. Find the latest commit that changed either
+    # conffile, or anything under lib/cluster.
+    real_rev=$(git log -1 --abbrev=9 --format=%h "$rev" -- $conffile $libdir)
+    Say "Deploying Slurm config from commit '$(C c)$real_rev$(C)', the latest" \
+        "one at or after${LF}the revision '$(C c)$rev$(C)' that has changed" \
+        "'$(C c)$conffile$(C)' and/or some files in '$(C c)$libdir/$(C)':"
+    { echo
+      git show --abbrev-commit --name-status --relative $real_rev
+      echo; } >&2
+
+    # Make sure at the least conffile and slurm.baseconf exist at the revision.
+    n=$(git ls-tree $real_rev -- $conffile $slurmbase | wc -l)
+    (( n == 2 )) ||
+      Die "At least one of $conffile or $slurmbase does not exist at" \
+          "the revision $real_rev"
+
+    # We are good to go transferring the files to the temp location.
+    git archive $real_rev -- $conffile $libdir
+  else
+    real_rev=$(git log -1 --abbrev=9 --format=%h)
+    Say "Deploying Slurm config from the work tree"
+    [[ -f $conffile ]] || Die "File '$(C c)$conffile$(C)' does not exist"
+    [[ -f $slurmbase ]] || Die "File '$(C c)$slurmbase$(C)' does not exist"
+    if [[ ! $(git ls-files -- $conffile) ]]; then
+      Warn "$(C y 'BIG, JUICY, HEFTY WARNING'): The file '$conffile'${LF}is" \
+           "not under Git source control. This will make going back to this" \
+           "configuration${LF}impossible in the future."
+      [[ $OPT_force ]] ||
+        Die "Refusing to deploy this configuration unless overridden with" \
+            "the --force option"
+      Confirm -y "Stop now to check this file under Git control" && exit 1
+      dirty=y
+    fi
+
+    # Check for merge conflicts: cannot deploy files if they have the conflict
+    # marks ('<<<<<' and friends).
+    n=$(git status --porcelain=1 -- $conffile $libdir |
+                      grep -cP '^(DD|AA|.U|U.)' || true)
+    if (( $n != 0 )); then
+      Say "Unresolved conflicts are found, '$(C c)git status$(C)'" \
+          "summary follows"
+      { echo; git status --long -- . ; echo; } >&2
+      Die "There are unresolved conflicts. Required files contain merge" \
+          "conflict marks, cannot deploy them."
+    fi
+
+    n=$(git status --ignored --porcelain=1 -- $conffile $libdir | wc -l)
+    if (( $n != 0 )); then
+      Say "Some required files are dirty or not under source control." \
+          "'$(C c)git status$(C)' summary follows:"
+      { echo; git status --ignored --long -- $conffile $libdir; echo; } >&2
+      dirty=y
+    fi
+
+    if [[ $dirty ]]; then
+      [[ $OPT_force ]] ||
+        Die "The worktree is dirty (has uncommitted changes).${LF}Won't" \
+            "deploy. Override this check by passing the --force switch"
+      real_rev=${real_rev}-dirty
+      Warn "The configuration is dirty (has uncommitted" \
+           "changes), will be marked $(C c)$real_rev$(C)"
+    fi
+
+    # Transfer current files to the temp directory.
+    tar c --exclude=.{,.} -- $conffile $libdir/
+  # End if [[ $rev ]]:
+  fi > $tempdir/_temp.tar  # So we do not run the if in a subshell.
+
+  # Part 2: Unpack the tarball in the temp directory, massage and deploy.
+  cd $tempdir
+  local conf cls clsfile datum
+
+  tar xf _temp.tar; rm _temp.tar
+  # We're now in the temp directory which is mirroring the main repo layout, but
+  # with only the required files present. All relative paths are still valid.
+
+  # If we were not lucky to be given a preparsed config, parse it now.
+  [[ $jdef ]] || jdef=$(ParseClusterConfig $conffile)
+
+  # For envsubst:
+  export CLUSTER=$cluster BURRMILL_SBIN=/usr/local/sbin
+
+  # Create config files archive
+  mkdir nodeclass
+
+  for conf in $libdir/*.conf $etcdir/*.conf; do
+    [[ -f $conf ]] && envsubst <$conf >./${conf##*/}
+  done
+
+  for cls in $(Jq -r "$jdef" '.nodes | keys[]'); do
+    clsfile=nodeclass/$cls.gclass
+    Say "Writing GCE node class definition $(C c)$clsfile$(C):"
+    Jq -r --arg cls $cls "$jdef" > $clsfile '
+              .nodes[$cls]._GCE | to_entries[] | "--\(.key): \(.value//"")" '
+    Dbg1 $clsfile:$'\n'"$(<$clsfile)"
+  done
+
+  Say "Adding Slurm node and partition definitions to $(C c)slurm.conf$(C):"
+  # YAML converts YES and NO to respective boolean true and false, and they are
+  # too easy to forget to quote; courtesy undo when putting the Slurm values.
+  # jq tip: any operation on the empty sequence yields the empty sequence.
+  { cat $slurmbase
+    Jq -r --arg cls $cls "$jdef" '
+      (.defnode + {"0NodeName":"DEFAULT", "1State":"CLOUD"}, .nodes[], .pars[])
+      | to_entries
+      | map(select(.key | startswith("_") | not))
+      | sort_by(.key)
+      | map( (.key | sub("^[0-9]"; "")) as $k
+           | ( .value // false | if type != "boolean" then .
+                                 elif . then "YES" else "NO" end ) as $v
+           | "\($k)=\($v)" )
+      | join(" ")'; } |
+    # +(over 9000) internets if you can read both jq and perl.
+    perl -lne 's/(?<!#)#(?!#).*$//; s/\s+$//; print if length' |
+    envsubst >slurm.conf
+  Dbg1 $'Final slurm.conf:\n'"$(<slurm.conf)"
+
+  # Now we have only files to deploy to the root of archive in ., and the
+  # nodeclass/ subdirectory. Remove everything else.
+  rm -rf etc lib
+  Say "Packaging Slurm configuration files at revision mark '$real_rev':"
+
+  # 60000 = group burrmill
+  datum=$(echo '#' $real_rev
+          tar cvv --owner=0 --group=60000 --mode=ug=rwX,o=rX \
+                  --exclude=.{,.} -- * |
+            gzip -9c | base64 -w0) &&
+    [[ $datum ]] || Die "Error encountered during packaging"
+
+  Say "Writing configuration to metadata '$(C c)$slurmconf_metakey$(C)'" \
+      "of project '$(C c)$project$(C)'. This takes a minute, wait."
+
+  $GC project-info add-metadata \
+      --metadata-from-file=${slurmconf_metakey}=<(echo "$datum")
+)
+
+#==============================================================================#
+# The remove command
+#==============================================================================#
+
+# Probably do not need this as a separate function?
+RemoveCluster() {
+  local jsdepl slurmconf
+  local cluster=${1?}
+
+  Say "Deleting cluster $(C c)$cluster$(C)." \
+      "This takes a few minutes, be patient"
+
+  Say "Removing project-wide Slurm configuration of cluster $(C c)$cluster$(C)."
+  slurmconf=${cluster}_slurm_config  # Metadatum name.
+  $GC project-info remove-metadata --keys=$slurmconf 2>/dev/null || true
+
+  # First, delete the deployment "the normal way", deleting resources. If
+  # this succeeds, good.
+  Say "Requesting the deletion of all cluster components."
+  $GDMD delete --format=none --verbosity=none -q $cluster && return
+
+  # If it fails, the reason is likely resources shared by deployments, one or
+  # more of the CNS disk, the backup schedule. We ignore these. The deployment
+  # is now in a failed state, and we can analyze why it is.
+  jsdepl=$($GDMD describe --format=json $cluster)
+
+  if JqTest "$jsdepl" ' .resources
+    |all( (.type | match("^compute.+disks$")) and
+            (.finalProperties | match("\\bdisklabel:\\s*burrmill_cns\\b")) or
+          (.type | match("^compute.+resourcePolicies$")))'; then
+    # All resources are expected to fail if shared, so just abandon them.
+    Say "$(C w)Ignore the error above$(C). Some resources are shared between" \
+        "deployments, repeating${LF}the delete request, this time"\
+        "disconnecting them from the deployment."
+    $GDMD delete --verbosity=none --delete-policy=abandon -q $cluster && return
+  fi
+
+  # If we are still here, deployment was not successfully deleted.
+  Warn "Some resources have failed to delete unexpectedly. See the table below:"
+  $GDMD describe $cluster
+  Say "We'll abandon these resources and continue deleting. Take note of" \
+      "them; they may end up not deleted.${LF}Resources named" \
+      "'resourcePolicies' are safe to leave; pay the most attention to" \
+      "instances and disks.${LF}After the command has completed, you may" \
+      "have to delete them manually.${LF}Open an issue with us if you did" \
+      "not alter the deployment manually: this is a bug then."
+  $GDMD delete --delete-policy=abandon -q $cluster
+}
+
+CmdRemove() {
+  local argspec="\
+$my0 [<common-options>] remove [<options>] <cluster>
+
+Remove the cluster <cluster>.
+
+Note that this also destroys cluster's shared disk and the login node's disk.
+TODO: Options for saving a snapshot before removal are not yet implemented.
+      You will be given a detailed workaround in the meantime.
+
+--
+ The 'remove' command options:
+r,regional         Make snapshot regional (default: multiregion, e.g. 'us')
+S,filer-snapshot   Preserve the common NFS disk in a snapshot.
+s,home-snapshot*   Preserve the login node home disk in a snapshot.
+
+$argp_common_options"
+
+  # Distinguish --filer-snapshot, --no-filer-snapshot and not specified, in
+  # which case we ask interactively.
+  OPT_filer_snapshot=x OPT_home_snapshot=x  # x = not explicitly specified.
+  ArgParse -g2 -a1 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+  cluster=$1
+
+  # Make sure the cluster exists, and is powered off.
+  err=none; bm-power show --strict $cluster || err=$?
+  case $err in
+    none) ;;
+    1|2|12) exit 1 ;; # 12=The cluster is ON, 1,2=does not exist, cannot delete.
+    *) Say "Despite the configuration errors reported above, we can proceed."
+  esac
+
+  ###+++
+  # TODO(kkm): Implement snapshotting. This is a plug that prevents the question
+  #            below from being asked, otherwise the flow will be absurd.
+  if [[ $OPT_filer_snapshot ]]; then  # Unless --no-filer-snapshot
+    Warn "TODO(kkm): Shared disk snapshotting is not implemented in v0.5-beta.
+
+$(C y)Deleting a cluster deletes its shared NFS disk.$(C)
+It is highly recommended to take a snapshot of the disk before deleting it
+and keep for at least a few weeks, just in case you need the data from it.
+Automation is coming in v0.6-beta. Meanwhile, take the snapshot manually:
+
+  * Open https://console.cloud.google.com/compute/disks?project=$project
+  * Locate disk named ${cluster}-shared-nfs-disk
+  * From the kebab menu in the \"Actions\" column, select \"Snapshot\"
+
+Do not confirm the next question until the snapshot is fully completed
+(has a checkmark in green circle in the Status column).
+"
+    OPT_filer_snapshot=  OPT_yes=  # Force confirmation
+  fi
+  #
+  ###---
+
+  # TODO: Disk may not even exist, would be nice to check.
+  [[ $OPT_filer_snapshot = x ]] &&
+    Confirm -y "Save the shared filer disk contents in a snapshot" \
+               "(highly recommended)" &&
+    OPT_filer_snapshot=y
+
+  [[ $OPT_yes ]] ||
+    Confirm "Continue deleting cluster '$(C c $cluster)' in" \
+            "project '$(C c $project)'" ||
+    exit 1
+
+  if [[ $OPT_filer_snapshot = y ]]; then
+    Die "Internal error, Should not end up here."
+    #TODO(kkm): Make a snapshot of the filer disk here. Need name, thus the
+    # resource record; we load in in bm-power, so split off a function?
+  fi
+
+  # Currently a function. We could use it in other places??
+  RemoveCluster $cluster
+
+  Say "Cluster '$(C c $cluster)' has been successfully" \
+      "deleted from project '$(C c $project)'"
+
+  # Notify bm-power to unset user's default cluster if it has just been deleted.
+  bm-power select --internal-rm=$cluster
+}
+
+#==============================================================================#
+# The new command.
+#==============================================================================#
+
+CmdNew() {
+  local argspec="\
+$my0 [<common-options>] new [<options>] <cluster>
+
+Deploy a new cluster from its manifest in etc/.
+
+For a fresh new project, '$my0 new <cluster>' is the last of the four steps
+bootstrapping a working BurrMill rig.
+
+The only required argument names a cluster. This is a short cluster codename;
+the corresponding file should be available in the source-controlled location
+etc/cluster/<cluster>.cluster.yaml. Always keep the configuration file in a Git
+repository. The easiest way to revert to a previously working configuration is
+use it's commit SHA or the tag with the '$my0 config' command.
+
+Before your first deployment with '$my0 new',
+  1) the project must be initialized: use bm-update-project;
+  2) a compute base image built: use bm-os-image;
+  3) the CNS disk snapshot created: use bm-node-software.
+
+We assume you have already read the docs, selected the name and the computing
+zone for your first cluster, copied and modified the cluster definition file
+template which we dropped into /etc/cluster/TEMPLATE.cluster.yaml, and chose the
+sizes wisely. You can always start smaller, monitor for signs of overload, and
+increase both computing power and common disk storage throughput and size later.
+Read the comments in the above mentioned TEMPLATE, too, with guidelines for
+sizing and naming.
+
+The cluster uses four specially named machine types, namely 'control', 'filer',
+'login', and, when running jobs, 'node'.
+
+We can perform only basic recovery if something is broken later. You should not
+modify instances or metadata by hand, and this can lead to unwanted behavior.
+Our main goal is to keep resources that require high-speed LAN communication
+all together in one zone. For this purpose, each cluster has a dedicated
+subnetwork, and every machine has the same network tag (same as cluster name),
+so they only communicate to each other. If you are an advanced user, you can
+violate some constraints, but please do it very judiciously. For example, using
+a fileserver in another zone or region is very slow, and the NFS traffic is no
+longer free, and very much so!
+
+Unless indicated by options, we'll ask a few questions interactively.
+--
+ The 'new' command options:
+
+S,filer-from=*SNAPSHOT  Restore previously saved filer disk.
+N,filer-new*   Make new filer disk.
+s,home-from=*SNAPSHOT TODO
+n,home-new*           TODO
+f,force       Deploy Slurm config even if it's dirty (not checked in).
+o,poweroff    Power off newly created machines at the end of deployment.
+
+$argp_common_options"
+
+  ArgParse -g2 -a1 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+  [[ $OPT_filer_new && $OPT_filer_from ]] &&
+    Die "Options --filer-new and --filer-from= are mutually exclusive"
+
+  # TODO: Add disk from snapshot option. below.
+  OPT_filer_new=y
+
+  cluster=$1
+
+  Say "Checking for an existing deployment of cluster '$(C c)$cluster$(C)'"
+  $GDMD --verbosity=none describe "$cluster" &&
+    Die "Cluster '$(C c)$cluster$(C)' has been deployed previously; check" \
+        "the deployment record above.${LF}If it got broken, use the" \
+        "'$(C c)$my0 fix $cluster$(C)' command."
+
+  jsconf=$(LoadClusterConfig $cluster)
+
+  # Shorter file name for diagnostics only.
+  descfile="etc/cluster/${cluster}.cluster.yaml"
+
+  zone=$(Jq -r "$jsconf" '.zone')
+  [[ $($GC 2>/dev/null zones list --filter="name=$zone") ]] ||
+    Die "Zone '$zone' set in $descfile does not seem to exist." \
+        "Check spelling."
+
+  Say "Confirming machine type availability in zone '$(C c)$zone$(C)'" \
+      "for main nodes in '$(C c)$descfile$(C)'"
+
+  jscfgrec=$(BuildConfigRecord "$jsconf")
+
+  Say "Creating new cluster '$(C c $cluster)' in zone '$(C c $zone)'," \
+      "project '$(C c $project)'"
+
+  Say "Verifying prerequisites: project, compute image, CNS snapshot."
+  cns_snapshot=$(VerifyPrereqsAndGetCnsDisk)
+
+  # Get all used network ranges. This maybe an overkill but clean.
+  networks=$($GC networks subnets list --format='json(ipCidrRange)' \
+                 --filter='network:/default AND ipCidrRange:10.*' )
+  # Due to our subrange split, the network is defined by the 2 middle bytes
+  # completely (10.X.Y.0), so use only these. $allips value looks like
+  # ':113.16:116.128:'.
+  allips=':'$(Jq -r "$networks" '
+       map(.ipCidrRange | split(".")[1:3] | join(".")) | join(":")')':'
+  Dbg1 "Existing IP ranges '$allips'"
+
+  while
+    let i=RANDOM%256
+    newipcidr=$((112+i/16)).$((i%16*16))
+    [[ $allips = *:$newipcidr:* ]]; do : ;
+  done
+  newipcidr=10.${newipcidr}.0/22
+  Dbg1 "Selecting random CIDR '$newipcidr'"
+  unset networks allips
+
+  #=============================================================================
+  # TODO: Support restoring a snapshot here.
+  if [[ ! 'TODO: Support restoring a snapshot here.' ]]; then
+
+  if [[ ! $OPT_filer_new && ! $OPT_filer_from ]]; then
+    Warn "Neither option --filer-new or --filer-from was specified." \
+         "Will create a new disk."
+  fi
+
+  # TODO: Maybe. Menu selection of snapshot? This snowballed quickly.
+  #       Snapshot may be smaller or larger than the size requested.
+  if [[ false ]]; then
+    Warn "Neither option --filer-new or --filer-from was specified.${LF}We'll" \
+         "look for snapshots, but won't offer $(C all) of them for selection."
+    filer_snaps=$($GC snapshots list \
+           --format='json(name,storageLocations.list(),diskSizeGb,
+                     creationTimestamp.date(format="%y-%m-%d.%H:%M",tz=))' \
+           --filter='autoCreated!=true AND labels.burrmill:* AND
+                     labels.disklabel=burrmill_filer')
+    [[ $filer_snaps = '[]' ]] && filer_snaps=
+    if [[ ! $filer_snaps ]]; then
+      Say "No $(C y specially labeled) filer snapshots were found. Assuming" \
+          "that a new filer disk is requested."
+    else
+      Say "Following are $(C y specially labeled) filer snapshots we found." \
+          "You can create a new disk, or base it on an existing snapshot."
+
+      # Menu: jq -r '.[]|("\(.name) [\(.creationTimestamp) \(.diskSizeGb)GB \(.storageLocations)]")' | column -t
+    fi
+  fi
+  #$GC snapshots describe $name --format='get(diskSizeGb)'
+
+  fi  # TODO
+  # End TODO section.
+  #=============================================================================
+
+  # TODO(kkm): Add type validation checks on load for these.
+  disk_size=$(Jq -r "$jsconf" '.size.shared_disk')
+  backup=$(Jq -r "$jsconf" '.backup//false')
+
+  # Present a summary, ask of confirmation unless -y is in effect.
+  SayBold "Summary of the new deployment:"; cat >&2 <<EOF
+------------------------------------------------
+Project . . . . . . . . . . . . . $(C c)${project}$(C)
+Cluster name  . . . . . . . . . . $(C c)${cluster}$(C)
+Zone  . . . . . . . . . . . . . . $(C c)${zone}$(C)
+Common node software disk . . . . $(C c)${cns_snapshot}$(C)
+Shared NFS disk size  . . . . . . $(C c)${disk_size}$(C)GB
+Periodic snapshot of NFS disk . . $(C c)${backup}$(C)
+NFS server  . . . . . . . . . . . $(C c)${cluster}-filer$(C)
+NFS server full power machine . . $(C c)$(Jq -r "$jscfgrec" .power.filer[1])$(C)
+NFS server low-power machine  . . $(C c)$(Jq -r "$jscfgrec" .power.filer[0])$(C)
+Login node  . . . . . . . . . . . $(C c)${cluster}-login$(C)
+Login node full power machine . . $(C c)$(Jq -r "$jscfgrec" .power.login[1])$(C)
+Login node low-power machine  . . $(C c)$(Jq -r "$jscfgrec" .power.login[0])$(C)
+------------------------------------------------
+EOF
+  [[ $OPT_yes ]] ||
+    Confirm -y "Is this a configuration you want to proceed with" ||
+    exit 2
+
+  slurmconf=${cluster}_slurm_config  # Mirror WriteSlurmConfig naming.
+  trap "set +e; echo >&2 Removing Slurm configuration from project; set -x;
+        $GC project-info remove-metadata --keys=$slurmconf 2>/dev/null" ERR EXIT
+
+  Say "Writing Slurm configuration to project metadatum $slurmconf"
+  WriteSlurmConfig -j "$jsconf" $cluster
+
+  Say "Deploying cluster $cluster. This may take up to 5 minutes."
+  props="zone:$zone,filer_size:$disk_size,cns_disk:$cns_snapshot"
+  props+=",ip_range:$newipcidr,backup:$backup"
+  # https://issuetracker.google.com/issues/149522850: bug in autorollback.
+  $GDMD create \
+        --template=$BURRMILL_LIB/deploy/cluster.jinja \
+        --labels=burrmill=1,cluster=$cluster,zone=$zone \
+        --properties="$props" $cluster || {
+    Error "Deployment failed, deleting it"
+    $GDMD delete -q $cluster || true
+    Die "Deployment unexpectedly failed. Please open an issue with us" \
+        "at:$LF2i$(C y)https://github.com/burrmill/burrmill/issues/new$LF1"; }
+
+  trap - ERR EXIT
+
+  WriteClusterRuntimeConfing $cluster "$jscfgrec"
+
+  Say "Waiting for the init completion signal from new machines"
+  declare warninigs=
+  declare -A checkinst=( [${cluster}-filer]=nfsd
+                         [${cluster}-control]=slurmctld )
+  deadline=$((SECONDS + 45))
+  while ((SECONDS <= deadline)); do
+    for inst in ${!checkinst[@]}; do
+      service=${checkinst[$inst]}
+      state=$($GCI get-guest-attributes --verbosity=none --zone=$zone \
+                   --query-path=oobe-service-ping/$service \
+                   --format='get(queryValue.items.value)' $inst) || true
+      case $state in
+        '') ;;
+        *)     printf '\r'; unset checkinst[$inst] ;;&  # Continue matching.
+        READY) Say "$(C c)$service$(C) is ready on $(C c)$inst" ;;
+        *)     Warn "$(C c)$service$(C) on $(C c)$inst reported error" \
+                    "status $(C y)$state"
+               warninigs=y ;;
+      esac
+    done
+    ((${#checkinst[@]} == 0)) && break
+    printf '.'; sleep 5
+  done
+  printf '\r'
+
+  for inst in ${!checkinst[@]}; do
+    service=${checkinst[$inst]}
+    Warn "No readiness signal received from $(C c)$service$(C) on" \
+         "$(C c)$inst$(C)${LF}within 45s. Connect to the instance and" \
+         "check the journal."
+    warninigs=y
+  done
+
+  if [[ $OPT_poweroff && $warninigs ]]; then
+    Say "You requested --poweroff, but there were warnings reported above."
+    Confirm -n "Do you still want to power off the cluster" || OPT_poweroff=
+  fi
+  if [[ $OPT_poweroff ]]; then
+    Say "Requesting poweroff of the newly deployed cluster with" \
+        "'$(C c)bm-power off $cluster$(C)'"
+    bm-power off $cluster
+  else
+    Say "The cluster machines are currently running. Use '$(C c)bm-power"\
+        "off $cluster$(C)' to turn them off later."
+  fi
+
+  SayBold "Deployment complete.$(C) Note that the cluster might not be" \
+          "in entirely consistent low-power state.${LF}Next time you" \
+          "power it on, use '$(C c bm-power) [$(C y low)|$(C y high)]" \
+          "$(C c)$cluster$(C)' to make it consistent."
+
+  # Notify bm-power of possible need to change user's preference
+  bm-power select --internal-add=$cluster
+}
+
+#==============================================================================#
+# The fix command
+#==============================================================================#
+
+CmdFix() {
+  local argspec="\
+$my0 [<common-options>] fix [<name>]
+
+Fix a broken deployment of a cluster, using its definition file in etc/ and the
+last known good GCP manifest.
+
+Run this command as the last resort attempt to recover the cluster. The command
+works by removing the deployment information from GCP, then gathering the
+components back into a working cluster, adding pieces that are missing.
+
+This operation is relatively harmless, except for one caveat: it must never be
+interrupted in progress. At some stage the deployment information is already
+erased from GCP, and, if the command is interrupted at this point, the manifest
+is irrevocably lost, and the command would simply find no trace of a previous
+deployment. We try to handle this state too, but this is already risky.
+
+The cluster will be powered off after command completes. No attempt is made to
+change state of existing components, so that the cluster may end up in an
+inconsistent power level state. Next time you power it on, use 'bm-power' with
+the low or high argument to make it consistent.
+--
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+  cluster=${1:-$(GetAndCheckCluster)}  # Exits on error.
+
+  Warn "The command may take up to 10 minutes to complete. It is very" \
+       "important not${LF}to interrupt the progress of this command." \
+       "If there is any possibility of remote connection${LF}loss, please" \
+       "use tmux or screen to run it. The Cloud Shell uses tmux, and" \
+       "allows reconnecting${LF}even if browser is shut down or disconnected," \
+       "so this is the recommended and the safest option."
+
+  [[ $OPT_yes ]] ||
+    Confirm "Begin the recovery of cluster '$(C c)$cluster$(C)'" || exit 0
+
+  set +e  # We do not rely on -e here, as we handle normally fatal errors.
+  Say "If you see any messages with the [$(C r ERROR)] mark, ignore them."
+
+  # See if there is a manifest. If not, we'll try to see if there are separate
+  # components that can be reassembled into the deployment.
+  lkgmf=$(GdmLatestManifest $cluster)
+  if [[ $lkgmf ]]; then
+    Say "Deployment manifest was found. Starting the 3-phase rebuild process."
+
+    # Normal scatter-gather rebuild.
+    # Restore state to the last known good manifest.
+    Say "$(C w Phase 1): Restoring the last known good configuration."
+    $GDMD update --format=none --manifest-id=$lkgmf $cluster
+
+    Say "Extracting deployment properties to apply at Phase 3."
+    # The conundrum is that the JSON manifests consists of YAML fragments,
+    # which we convert to JSON to process and build a new YAML record. DM is
+    # indeed a helpful service, but some of its design points are amusing.
+    jsprops=$($GDM manifests describe $lkgmf \
+                   --deployment=$cluster --format=json |
+                # the pipe is JSON with embedded YAML.
+                $JQ -r .config.content |
+                # This is a pure YAML config document
+                y2j |
+                # Which we transform to JSON, because we have jq, not yq.
+                #
+                # For reference, the .resources[0].properties looks like:
+                # { "backup": false, "cns_disk": "burrmill-cns-v005-200128",
+                #   "filer_size": 50, "ip_range": "10.119.224.0/22",
+                #   "zone": "us-west1-b" }
+                #
+                $JQ -r '.resources[0].properties')
+    props=$(Jq -r "$jsprops" ' to_entries
+                             | map("\(.key):\(.value)")
+                             | join(",")' )
+    Dbg1 "Deployment properties: $props"
+    zone=$(Jq -r "$jsprops" .zone)
+    Dbg1 "Zone: $zone"
+
+    Say "$(C w Phase 2): Removing manifest and the resource records"
+    $GDMD delete --format=none --delete-policy=abandon -q $cluster
+  else
+    Warn "Deployment manifest for '$(C c)$cluster$(C)' is missing."
+
+    # We can look in other places to confirm the user used a valid name:
+    #   a. The deployment config record
+    #   b. Slurm config.
+    #   c. Actual disks and machines.
+    #
+    # But this is a whole scavenging process. Hope the user makes a sensible
+    # thing and does not muck with the cluster to the point so that it needs
+    # this command, and after that performs the second misdemeanor by killing
+    # the fixup script right at the wrong moment. This is unlikely, hence
+    # waits till v1.0.
+    #
+    # props= are regenerated from the etc/XX.cluster.yaml file.
+    Die "TODO: Implement the above recovery steps by v1.0"
+  fi
+
+  Say "$(C w Phase 3): Creating missing and assembling existing components" \
+      "into a new deployment."
+  $GDMD create \
+        --template=$BURRMILL_LIB/deploy/cluster.jinja \
+        --labels=burrmill=1,cluster=$cluster,zone=$zone \
+        --properties="$props" $cluster || {
+    Error "Deployment failed, deleting it"
+    $GDMD delete --delete-policy=abandon -q $cluster || true
+    Die "Deployment unexpectedly failed. All existing instances and disks" \
+        "are still around.${LF}Use the following commands to figure out" \
+        "what you have:${LF2}  $(C c)$GCI list$(C)$LF1  $(C c)$GC disks" \
+        "list$(C)${LF2}Please open an issue with us at:$LF2  " \
+        "$(C y)https://github.com/burrmill/burrmill/issues/new$LF1"; }
+
+  Say "Restoring to the last known good state was successful." \
+      "Running '$(C c)bm-power off --wait $cluster$(C)' command"
+  bm-power off --wait $cluster
+
+  Say "Reapplying manifest changes with '$(C c)bm-deploy config $cluster$(C)'"
+  bm-deploy config --yes --only-if-missing $cluster
+
+  SayBold "Rebuild of the cluster '$(C c)$cluster$(C w)' complete"
+}
+
+#==============================================================================#
+# The config command
+#==============================================================================#
+
+CmdConfig() {
+  local argspec="\
+$my0 [<common-options>] config [<config-options>] [<cluster>]
+
+Read cluster configuration file in etc/ and apply changes to the cluster.
+
+The following information is reconciled by this command:
+ * Shared NFS disk size (the GCE shared NFS disk is enlarged)
+ * Machine sizes and types (in the runtime config record)
+ * Complete Slurm configuration and node types. (in slurm config metadata)
+
+Changing the cluster zone is an error. Once deployed, the cluster cannot be
+moved. However, the disks may be snapshot, and an identical deployment created
+in a different zone. This is a supported, two step process.
+
+Remember that GCE disks can be enlarged, but not shrunk. Be conservative. We
+offer 4 starting cluster size recommendations, in S, M, L and XL, with disk size
+and NFS server balanced from our own experience. Refer to the documentation
+linked to below if you need to step up the size. Of course, your workload
+pattern may call for finer tuning.
+
+https://100d.space/p/burrmill/609#3nfspreset - starting 'presets'.
+https://100d.space/p/burrmill/609#2nfs       - full section with explanation.
+
+The command has no arguments to pass it config values. Instead you change the
+cluster definition file etc/<cluster>.cluster.yaml, and then run this tool to
+apply changes. Note that the file must be checked into a Git repository, since
+Slurm configuration mark is taken from a Git commit. To allow deploying a dirty
+configuration, use the --force switch, although this is very highly recommended
+against, and should only be used only while debugging the cluster setup.
+
+The --slurm-only switch applies the Slurm config only, which is quicker.
+
+A recommended workflow is:
+ * Make changes and commit them, but do not yet replicate (push) to the remote;
+ * Deploy the Slurm config with this tool;
+   + If not satisfied, make changes and amend the commit, repeat deployment.
+   + If satisfied, push the Git changes to your remote for safekeeping ASAP.
+This way you guarantee that a good commit ID to return back to exists in Git,
+and the commit is replicated at least one remote server for safekeeping.
+--
+r,revision=R         Deploy from git revision R. Default is the worktree.
+s,slurm-only         Only update Slurm config (a bit faster).
+f,force              Update Slurm configuration even if dirty (uncommitted)
+only-if-missing*     (hidden) Used by bm-deploy fix command only. Implies -f.
+
+$argp_common_options"
+  # General note: the DM cannot be used to enlarge the disk via dm update, since
+  # it is unaware of the way to set disk size. This part is still in beta, and
+  # is documented poorly. Some resources can be changed outside of the usual
+  # CRUD operation set, but the disk size is not one of them. Fortunately, the
+  # DM does not yell at you if the disk size has changed outside of its control,
+  # and reattaches a disk with the size not matching the deployment record.
+
+  ArgParse -g2 -a0 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+  cluster=${1:-$(GetAndCheckCluster)}
+
+  # Verify that the cluster has been deployed, and is offline.
+  # -p is for "no intent to change power state", suppressing some checks.
+  jsactual=$(LoadAndValidateClusterState -p)
+
+  # Load cluster definition file.
+  jsdesired=$(LoadClusterConfig $cluster)
+  zone=$(Jq -r "$jsdesired" .zone)
+
+  # Warn/disallow reconfiguratuion under power.
+  powerstate=$(Jq -r "$jsactual" '.n_main|map(.status)|unique|join(":")')
+  powerforce=
+  if [[ $powerstate != TERMINATED ]]; then
+    if [[ $OPT_force ]]; then
+      powerforce=y  # Enlarge NFS disk on the powered-up filer.
+      WorD=Warn
+      msg=("Make sure to either reboot '$(C c)${cluster-control}$(C)' or run "
+           "'$(C c)systemctl restart slurmctld$(C)' on it")
+    else
+      WorD=Die
+      msg=("If you are debugging the cluster, you may override this restriction"
+           "with --force, but${LF}make sure to reboot the controller or run"
+           "'$(C c)sudo systemctl restart slurmctld$(C)' on it.")
+    fi
+    $WorD "Cluster '$(C c)$cluster$(C)' must be powered off. Changing Slurm" \
+          "configuration while the${LF}cluster is online will create" \
+          "inconsistencies between controller and compute" \
+          "nodes.${LF}""${msg[@]}"
+  fi
+
+  # When called during recovery, leave config alone unless missing.
+  if ! [[ $OPT_only_if_missing && $($GC project-info describe --format="\
+             get(commonInstanceMetadata[${cluster}_slurm_config])") ]]; then
+    SayBold "Verifying/updating Slurm configuration"
+    WriteSlurmConfig "-j$jsdesired" ${OPT_revision:+-r$OPT_revision} $cluster
+  else
+    Say "Keeping existing Slurm configuration."
+  fi
+
+  [[ $OPT_slurm_only ]] && return 0
+
+  SayBold "Checking shared NFS disk size"
+  # Check to see if the filer disk needs to be enlarged.
+  fdisk_desired=$(Jq -r "$jsdesired" .size.shared_disk)
+  fdisk_uri=$(Jq -r "$jsactual" .filer_disk)
+  [[ $fdisk_uri ]] ||
+    Die "Cluster '$(C c)$cluster$(C)' is missing the shared NFS disk." \
+        "$(C y This does not look good).${LF}If this is unexpected, you need"\
+        "to locate it, or restore from a snapshot. The disk name${LF}for" \
+        "this cluster is '$(C y)$cluster-shared-nfs-disk$(C)', in the zone" \
+        "'$(C c)$zone$(C)'. After you find or${LF}recreate it, run" \
+        "'$(C c)bm-deploy fix $cluster$(C)' to reattach it. Be aware that" \
+        "the fix process will${LF}create a new empty disk if it's unable to" \
+        "find an existing disk, and this may not likely${LF}be what you" \
+        "really want. The commands that may help you are lost:$LF2  " \
+        "$(C c)$GCI disks list --zone=$zone$(C)$LF1  $(C c)$GCI snapshots" \
+        "list$(C)${LF2}If in doubt, and suspect a data loss, please contact" \
+        "us by opening an issue at$LF2  " \
+        "$(C y)https://github.com/burrmill/burrmill/issues/new$LF1"
+  fdisk_actual=$($GC disks describe $fdisk_uri --format='get(sizeGb)')
+  Dbg1 "Actual=$fdisk_actual Desired=$fdisk_desired for $fdisk_uri"
+  if (( $fdisk_desired > $fdisk_actual )); then
+    [[ $powerforce ]] || Die "Won't enlarge disk on the powered-on cluster"
+    if [[ $OPT_yes ]] && (( $fdisk_desired < 4 * $fdisk_actual )) &&
+         Confirm -y "Large resize of '$(C c)${fdisk_uri##*/}$(C)'" \
+                    "requested: from $(C c)$fdisk_actual$(C) to" \
+                    "$(C c)$fdisk_desired$(C)GB. Continue"; then
+      Say "Enlarging shared NFS disk '$(C c)${fdisk_uri##*/}$(C)' from" \
+          "$(C c)$fdisk_actual$(C) to $(C c)$fdisk_desired$(C) GB"
+      $GCI disks resize $fdisk_uri --size=${fdisk_desired}GB
+    fi
+  fi
+
+  SayBold "Checking/updating runtime configuration record$(C)${LF}If there" \
+          "are changes, use '$(C c)bm-power$(C) [ $(C y)low$(C) |" \
+          "$(C y)high$(C) ]' next time when powering the cluster on"
+  WriteClusterRuntimeConfing $cluster "$(BuildConfigRecord "$jsdesired")"
+}
+
+#==============================================================================#
+# The list command
+#==============================================================================#
+
+CmdList() {
+  local argspec="\
+$my0 list
+
+List deployed clusters.
+--
+"
+  # No common options, not applicable.
+  # TODO(kkm): This is too basic.
+
+  ArgParse -g2 -a0 -A0 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  $GDMD list
+}
+
+#==============================================================================#
+# The tool entrypoint.
+#==============================================================================#
+
+argspec_top="\
+$my0 [<common-options>] <command> [<command-options>] [<command-args>...]
+$my0 <command> --help  # Get help on individual commands.
+
+Deploy, remove, list, configure and resuscitate BurrMill clusters.
+
+'$my0 new' is the last of the four bootstrap steps to a working BurrMill rig.
+
+<command> is one of:
+  new     - Deploy, check consistency of, or repair a cluster deployment.
+  remove  - Remove a deployed cluster.
+  fix     - Try to fix a deployment. [Not implemented]
+  list    - List deployed clusters.
+  config  - Update cluster and/or Slurm configs.
+
+The common options are accepted either before or after the command.
+All long options and command names can be shortened to an unambiguous prefix.
+--
+$argp_common_options"
+
+ArgParse -uc'config fix new list ls remove rm' -dhelp "$argspec_top"
+
+verb=${POPT_ARGV-}
+unset POPT_ARGV[0]
+
+case $verb in
+  config)    CmdConfig     ;;
+  fix)       CmdFix        ;;
+  list|ls)   CmdList       ;;
+  new)       CmdNew        ;;
+  remove|rm) CmdRemove     ;;
+  *) Die "$my0:$LINENO:internal error:command verb case missing"
+esac
+exit 0

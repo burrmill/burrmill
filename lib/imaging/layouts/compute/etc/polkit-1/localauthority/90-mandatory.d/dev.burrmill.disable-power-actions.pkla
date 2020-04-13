@@ -1,0 +1,12 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+[Disable power actions interfering with GCE]
+Identity=unix-user:*
+Action=org.freedesktop.login1.inhibit-handle-power-key;org.freedesktop.login1.hibernate*;org.freedesktop.login1.suspend*;org.freedesktop.login1.set-reboot-to-firmware-setup
+ResultAny=no
+ResultActive=no
+ResultInactive=no

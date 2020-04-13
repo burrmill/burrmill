@@ -1,0 +1,33 @@
+From a2d7b70f65691e4af4d1ff7d0cd9636a683bb1c6 Mon Sep 17 00:00:00 2001
+From: kkm <kkm@100d.space>
+Date: Mon, 9 Dec 2019 12:18:31 -0800
+Subject: [PATCH] BurrMill: Make sbatch poll for job completion every second
+
+The default wait time increases with every poll and is capped at 10s.
+Kaldi jobs are very short, and this noticeably affects performance.
+---
+ src/sbatch/sbatch.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/src/sbatch/sbatch.c b/src/sbatch/sbatch.c
+index db11e08707..2e3bee24fa 100644
+--- a/src/sbatch/sbatch.c
++++ b/src/sbatch/sbatch.c
+@@ -395,13 +395,12 @@ static int _job_wait(uint32_t job_id)
+ 	slurm_job_info_t *job_ptr;
+ 	job_info_msg_t *resp = NULL;
+ 	int ec = 0, ec2, i, rc;
+-	int sleep_time = 2;
++	const int sleep_time = 1;
+ 	bool complete = false;
+ 
+ 	while (!complete) {
+ 		complete = true;
+ 		sleep(sleep_time);
+-		sleep_time = MIN(sleep_time + 2, 10);
+ 
+ 		rc = slurm_load_job(&resp, job_id, SHOW_ALL);
+ 		if (rc == SLURM_SUCCESS) {
+-- 
+2.20.1
+

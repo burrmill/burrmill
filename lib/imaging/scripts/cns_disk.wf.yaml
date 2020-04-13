@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This Daisy workflow creates a new CNS disk snapshot.
+#
+# It's very simple and linear. Since Daisy does not have a step for making
+# a snapshot, we snapshot the drive from inside the workflow script.
+#
+# Ubuntu 18.04 is used as the build system, because we need both Docker and
+# GCSDK (gcloud, gsutil). There is no suitable stock image that would contain
+# both, but Ubuntu's snap installer installs Docker really in a snap, without
+# the long initial package database bootstrap required by apt.
+#
+# Daisy cannot read YAML files, so this file is first converted to JSON by the
+# bm-cns-disk tool, which also handles all the required variables to pass to the
+# workflow. Additionally, the using of YAML's advanced features (& and *) helps
+# make clunky Daisy syntax more readable.
+---
+Name: cns
+# TODO(kkm): Set reasonable after debugging.
+DefaultTimeout: 120m
+
+Vars:
+  diskname:
+    Required: true
+    Description: CNS image snapshot name, e.g. burrmill-cns-v001-191228
+  manifest:
+    Required: true
+    Description: Compact mage manifest. Read cns_disk.sh and bm-cns-disk
+                 sources for the exact format.
+  region:
+    Required: true
+    Description: Region where build is performed. The snapshot is stored in
+                 the encompassing multiregion.
+  size:
+    Value: '35'
+    Description: Disk size in GB.
+
+Sources:
+  script: cns_disk.sh
+
+Steps:
+  &10 make-all-d:
+    CreateDisks:
+    - Name: boot-d
+      SourceImage:
+        projects/ubuntu-os-cloud/global/images/family/ubuntu-minimal-1804-lts
+      SizeGb: '50'
+      Type: pd-ssd
+    - Name: target-d
+      RealName: ${diskname}-proto
+      SizeGb: ${size}
+      Type: pd-ssd
+
+  &20 start-boot-m:
+    CreateInstances:
+    - Name: boot-m
+      MachineType: e2-highcpu-2
+      NetworkInterfaces:
+      - subnetwork: regions/${region}/subnetworks/service
+      ServiceAccounts:
+      - email: bm-z-image-build@${PROJECT}.iam.gserviceaccount.com
+        scopes:
+        - https://www.googleapis.com/auth/cloud-platform
+      Disks:
+      - Source: boot-d
+      - Source: target-d
+      Metadata:
+        manifest: ${manifest}
+        snapshot: ${diskname}
+      StartupScript: script
+
+  # No need for explicit deletion of the instance or disks, Daisy does it.
+  # The snapshot is created in the script, as Daisy does not have a step for it.
+  &30 wait-boot-m:
+    WaitForInstancesSignal:
+    - Name: boot-m
+      Interval: 5s  # Daisy misses the status if using the default 20s.
+      SerialOutput:
+        Port: 1
+        StatusMatch:  'BUILD_STARTED:'
+        FailureMatch: 'BUILD_FAILURE:'
+        SuccessMatch: 'BUILD_SUCCESS:'
+
+Dependencies:
+  *20: [*10]
+  *30: [*20]

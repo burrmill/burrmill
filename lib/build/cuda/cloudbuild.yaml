@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+substitutions:
+  # CUDA version and update number, and the URL to fetch the .run file from.
+  # Get one from https://developer.nvidia.com/cuda-downloads, or refer to
+  # the table at https://100d.space/TODO(kkm): Define me
+  # Make sure the version and the URL match! We cannot check.
+  _CUDA_VER: '10.1.2'
+  _CUDA_SOURCE_URL:
+    http://developer.download.nvidia.com/compute/cuda/10.1/Prod/local_installers/cuda_10.1.243_418.87.00_linux.run
+
+#++ Boilerplate
+  _GS_LOCATION: $_GS_LOCATION
+  _GS_SCRATCH:  $_GS_SCRATCH
+  _GS_SOFTWARE: $_GS_SOFTWARE
+
+logsBucket: $_GS_SCRATCH/cloudbuild/logs
+options:
+  logging: GCS_ONLY
+  env:
+  - _GS_LOCATION=$_GS_LOCATION
+  - _GS_SCRATCH=$_GS_SCRATCH
+  - _GS_SOFTWARE=$_GS_SOFTWARE
+#-- Boilerplate
+
+timeout: 900s
+tags: [cuda]
+
+steps:
+- name: gcr.io/cloud-builders/docker
+  args:
+  - build
+  - --build-arg=_CUDA_VER=$_CUDA_VER
+  - --build-arg=_CUDA_SOURCE_URL=$_CUDA_SOURCE_URL
+  - --tag=$_GS_LOCATION.gcr.io/$PROJECT_ID/cuda:$_CUDA_VER
+  - .
+
+images:
+- $_GS_LOCATION.gcr.io/$PROJECT_ID/cuda:$_CUDA_VER

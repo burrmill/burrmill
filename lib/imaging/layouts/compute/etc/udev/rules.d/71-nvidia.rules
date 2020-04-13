@@ -1,0 +1,19 @@
+# This file was installed by BurrMill.
+#
+# NVIDIA driver compute-only setup. We do not set up or load any video drivers.
+
+# Upon loading the nvidia module, load nvidia-uvm and set Exclusive compute
+# mode. nvidia-smi also creates all /dev nodes for this module.
+ACTION=="add", DEVPATH=="/module/nvidia", SUBSYSTEM=="module", \
+  RUN+="/sbin/modprobe nvidia-uvm", \
+  RUN+="/usr/bin/nvidia-smi -c 3"
+
+# The nvidia-uvm device nodes are created by create-uvm-dev-node, a helper
+# script lifted from an Ubuntu package, so that nvidia-modprobe is not needed.
+ACTION=="add", DEVPATH=="/module/nvidia-uvm", SUBSYSTEM=="module", \
+  RUN+="/usr/local/sbin/create-uvm-dev-node"
+
+# Unload nvidia driver on nvidia-uvm unload, just in case a full reload
+# of the driver is required.
+ACTION=="remove", DEVPATH=="/module/nvidia-uvm", SUBSYSTEM=="module", \
+  RUN+="/sbin/modprobe -r nvidia"

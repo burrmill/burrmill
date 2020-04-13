@@ -1,0 +1,46 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# This program is invoked with the corresponding service identity (slurmctld
+# runs as the user 'slurm'; slurmd as root) immediately after the daemon has
+# forked. For slurmctld we ensure that all necessary triggers are installed,
+# idempotently. For slurmd, nothing is done.
+#
+# The parameter $1 is hardcoded in corresponding .service files, no magic.
+
+set -u
+
+. slurm_common.inc.sh
+
+case ${1-} in
+  slurmd) ;;
+
+  slurmctld)
+    # Note that the daemon has just forked, and is not listening on its port
+    # yet; at first I was thinking that some code to wait for its ready state
+    # would be required here. However, it appears that Slurm command utilities
+    # have a builtin retry and backoff loop (Slurm is an awesome piece of
+    # machinery!), and the timeout is on the order of minutes, reasonable for a
+    # hardware cluster when switching to a backup controller, and far greater
+    # than any sane time required for slurmctld to become responsive (the worst
+    # I clocked was ~1500ms, and that's on a toy-sized GCE g1 machine).
+    trig=$(strigger --get --down --user=slurm  --noheader) ||
+      Fatal "'strigger get --down' command failed. Is strigger on PATH?"
+
+    [[ $trig ]] && exit  # The trigger is already set.
+
+    script=/usr/local/sbin/slurm_trigger_node_down_recover.sh
+    strigger --set --down --flags=PERM --offset=20 --program=$script ||
+      Fatal "'strigger set --down' command failed. Does $script exist?"
+
+    # Report successful start.
+    GetSetMetadata instance/guest-attributes/oobe-service-ping/slurmctld READY
+    ;;
+
+  *) Fatal "Invalid or absent argument: '${1-}'"
+esac
+
+exit 0

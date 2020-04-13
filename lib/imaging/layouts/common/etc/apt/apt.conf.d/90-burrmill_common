@@ -1,0 +1,4 @@
+// This file was installed by BurrMill.
+// It's just a bloat, but some distros set this to "1".
+
+APT::Install-Recommends "0";

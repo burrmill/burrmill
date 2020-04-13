@@ -1,0 +1,98 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# Extract machine SSH key, common to all BurrMill nodes, from the GCP Secret
+# Manager, and install it. Since even more permanent nodes (such as the filer or
+# the controller) are re-created fresh from image instead of installing updates,
+# your known_hosts file would teem with stale keys, and ssh will yell about a
+# changed key and refuse to connect. Using a single key enables even setting
+# StrictHostcheck to yes, as long as all names are mapped to a single host key
+# name using HostKeyAlias. This is covered in the BurrMill 101 crash course,
+# part 5, the last one: https://100d.space/burrmill-101
+
+. burrmill_common.inc.sh
+
+set -euo pipefail
+
+readonly secmgrapi=https://secretmanager.googleapis.com/v1beta1
+readonly secret=burrmill-hostkey
+readonly kpri=ssh_host_ed25519_key
+readonly kpub=${kpri}.pub
+
+# If the key file exists, just exit. The bad news is, if your key leaks you'll
+# have to either reimage nodes or manually delete the key from them (after
+# replacing the key in the Secret Manager, of course). The good news is no one
+# cares about eavesdrropping on the communication between you and your cluster
+# to organize a real MITM attack, so no one is after this key.
+if [[ -s /etc/ssh/$kpri ]]; then
+  chown 0:0 /etc/ssh/$kpri
+  chmod 600 /etc/ssh/$kpri  # Just in case, or sshd wont start.
+  exit 0
+fi
+
+# Redirect stderr such that messages are reported as errors to journal.
+exec 4>&2 2> >(while read -r; do printf >&4 '<2> %s\n' "$REPLY"; done)
+
+# Prepare a working directory in RAM tmpfs.
+mkdir -p /run/burrmill
+workdir=$(mktemp -d -p /run/burrmill)
+trap "exec >&2-; rm -rf $workdir" EXIT
+chmod 700 $workdir
+chown 0:0 $workdir
+cd $workdir
+
+# Get private key from the Secrets API.
+project=$(MetadataOrDie 'project/project-id')
+token=$(MetadataOrDie instance/service-accounts/default/token |
+          jq -r .access_token)
+# We should not get here ever, because -e, but anyway.
+[[ $token ]] || Fatal "Unable to fetch machine account security token."
+
+deadline=$((SECONDS + 6))
+until
+  (( SECONDS >= deadline )) || {
+    curl --max-time 6.0 --connect-timeout 3.0 -fsS \
+         -H"Authorization: Bearer $token" \
+         "$secmgrapi/projects/$project/secrets/$secret/versions/latest:access" |
+      jq -r .payload.data | base64 -d > $kpri &&
+    [[ -s $kpri ]]; }
+do
+  sleep 0.7
+done || true
+
+# Detect an empty file, or otherwise truncated for any reason.
+[[ -s $kpri ]] && fgrep -q -- '-END OPENSSH PRIVATE' $kpri ||
+  Fatal "Did not obtain a well-formed SSH host key from secret '$secret'"
+
+# ssh-keygen will not work if ownership and permissions are incorrect.
+chown 0:0 $kpri
+chmod 600 $kpri
+
+# ssh-keygen can hang on a prompt if the key file is malformed.
+timeout -k0.25 0.5 ssh-keygen -y -f $kpri >$kpub </dev/null ||
+  Fatal "Unable to decode SSH host key from secret '$secret'"
+
+# Looks good, install.
+chown 0:0 $kpub
+chmod 644 $kpub
+cp -p $kpri $kpub /etc/ssh/
+rm -f *
+
+Log auth.notice "Installed shared cluster machine SSH keys $kpri and $kpub"
+
+# Close subshell explicitly.
+exec >&2- 2>&4
+cd /
+rm -rf $workdir
+trap - EXIT ERR
+
+# This is called, if present, to add common keys to the known_hosts file.
+# Looks like it does not yet work wonders tho. Don't make much fuzz if it fails.
+if [[ -x /usr/local/sbin/update_known_hosts ]]; then
+  /usr/local/sbin/update_known_hosts || true
+fi
+
+exit 0

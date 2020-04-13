@@ -1,0 +1,59 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright 2001-2010 Randall Donald <rdonald@debian.org>
+# Copyright 2009-2017 Andreas Beckmann <anbe@debian.org>
+# Copyright 2010 Russ Allbery <rra@debian.org>
+# Copyright 2018 Canonical Ltd
+#
+# Based on packages by Christopher Cheney.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
+#
+# On Debian systems, copy of GNU General Public License version 2
+# is located at /usr/share/common-licenses/GPL-2.
+
+#==============================================================================#
+# kkm's notes:
+#
+# The creation of these dev nodes is normally done with the nvidia-modprobe tool
+# from NVIDIA. I do not remember why it did not work well in the headless
+# compute-only environment, but this script does it just fine.
+#
+# nvidia-uvm allocates its major node dynamically with alloc_chrdev_region() in
+# nvidia-uvm/uvm_common.c:
+#
+# /var/lib/dkms/nvidia/418.67/source/nvidia-uvm/uvm_common.c:
+#    // The various helper init routines will create their own minor devices, so
+#    // we only need to create space for them here.
+#    int ret = alloc_chrdev_region(....)
+#
+# And the actual list of the "various" minor devices is defined in
+# /var/lib/dkms/nvidia/418.67/source/nvidia-uvm/uvm_minimal_init.h:
+#
+#    enum {
+#        NVIDIA_UVM_PRIMARY_MINOR_NUMBER = 0,
+#        NVIDIA_UVM_TOOLS_MINOR_NUMBER   = 1,
+#        NVIDIA_UVM_NUM_MINOR_DEVICES
+#    };
+#
+# This is the relation of the minors 0 and 1 to actual functions in the driver.
+# The major is allocated dynamically, so the search here is entirely warranted.
+#==============================================================================#
+
+# Get the major device number for nvidia-uvm and create the node.
+major=`grep nvidia-uvm /proc/devices | awk '{print $1}'`
+if [ -n "$major" ]; then
+    mknod -m 666 /dev/nvidia-uvm c $major 0
+    mknod -m 666 /dev/nvidia-uvm-tools c $major 1
+fi

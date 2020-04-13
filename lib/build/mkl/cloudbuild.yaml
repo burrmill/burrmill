@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+substitutions:
+  # MKL version to fetch and install.
+  _MKL_VER: '2019.5'
+
+#++ Boilerplate
+  _GS_LOCATION: $_GS_LOCATION
+  _GS_SCRATCH:  $_GS_SCRATCH
+  _GS_SOFTWARE: $_GS_SOFTWARE
+
+logsBucket: $_GS_SCRATCH/cloudbuild/logs
+options:
+  logging: GCS_ONLY
+  env:
+  - _GS_LOCATION=$_GS_LOCATION
+  - _GS_SCRATCH=$_GS_SCRATCH
+  - _GS_SOFTWARE=$_GS_SOFTWARE
+#-- Boilerplate
+
+tags: [mkl]
+
+steps:
+- name: gcr.io/cloud-builders/docker
+  args:
+  - build
+  - --build-arg=_MKL_VER=$_MKL_VER
+  - --tag=$_GS_LOCATION.gcr.io/$PROJECT_ID/mkl:$_MKL_VER
+  - .
+
+images:
+- $_GS_LOCATION.gcr.io/$PROJECT_ID/mkl:$_MKL_VER

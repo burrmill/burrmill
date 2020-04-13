@@ -1,0 +1,21 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+[Unit]
+Description=Acquire hostname from metadata
+After=network.target
+
+# This unit is a provider of host name, so pulls nss-lookup.target.
+Before=nss-lookup.target
+Wants=nss-lookup.target
+
+[Service]
+ExecStart=/usr/local/sbin/hostname_from_metadata
+Type=oneshot
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

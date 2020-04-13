@@ -1,0 +1,19 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+[Unit]
+Description=BurrMill filer NFS automount for /mill
+
+# NFS mount involves a name lookup.
+After=nss-lookup.target
+Before=remote-fs.target
+
+[Automount]
+Where=/mill
+DirectoryMode=777
+
+[Install]
+WantedBy=remote-fs.target

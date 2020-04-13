@@ -1,0 +1,143 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# A filter to format a table with pseudographics using groff and tbl.
+
+use strict;
+use warnings;
+
+use Getopt::Long qw(:config gnu_getopt no_ignore_case);
+use Pod::Usage;
+
+# Command line switches.
+my $allbox = 0;
+my $header = 0;
+my $help = 0;
+my $split = "\t";
+my $title = 0;
+
+sub fatal {
+  my $msg = shift;
+  my %e = ( -message => "$0: $msg" ) if $msg;
+  pod2usage(%e, -exitval => 1, -verbose => 0);
+}
+
+GetOptions ("header|H=s" => \$header,
+            "title|T=s"  => \$title,
+            "allbox|b"   => \$allbox,
+            "split|s=s"  => \$split,  # Undocumented, unsafe for general public.
+            "help|h"     => \$help) or fatal();
+pod2usage(-exitval => 2, -verbose => 3) if $help;
+fatal("The --header option is required.") unless $header;
+fatal("The --split option argument must be a single character.")
+    unless length($split) == 1;
+
+my %headspec = ('|' => 'C', '>' => 'R', '.' => 'R');
+my %bodyspec = (%headspec, '.' => 'N');
+
+my $headform = "";   # Accumulate e.g. 'L|L|C|R', for headers.
+my $bodyform = "";   # Accumulate e.g. 'L|L|C|N', for the body.
+my $titleform = "";  # Accumulate e.g. 'CSSS', for the title cell.
+
+my $headline = "";   # Headers, with the \t (or $split) between each.
+
+my $titlelt = 'C';   # Assigned to 'S' on every but the first iteration.
+my $formsep = '';    # Same, to '|'.
+my $headsep = '';    # Same.
+
+while($header =~ /([<|>.]?)(.[^<|>.]*)/g) {
+  $headline .= $headsep . $2;
+  $headform .= $formsep . ($headspec{$1} // "L");
+  $bodyform .= $formsep . ($bodyspec{$1} // "L");
+  $titleform .= $titlelt;
+  $headsep = $split;
+  $formsep = '|';
+  $titlelt = 'S';
+}
+
+my $tabspec = $split ne "\t" ? "tab($split) " : ""; # \t is the default.
+my $boxspec = $allbox ? "allbox" : "box";
+my $horzline = $allbox ? "" : "_\n";
+
+my $command = 'groff -tbl -Tutf8';
+open(my $groff, "| $command") ||
+    die "Unable to exec '$command'. Is groff available?\n";
+select $groff;
+
+print(".pl 99999\n.ll 99999\n.nh\n" .  # Infinite page, don't hyphenate.
+      ".rchar - ` '\n" . # Undo the horrible substitution done unicode.tmac.
+      ".TS\n${tabspec}nowarn ${boxspec};\n");
+print("$titleform\n") if $title;
+print("${headform}\n${bodyform}.\n");
+print("${title}\n${horzline}") if $title;
+print(" ${headline}\n${horzline}");   # Note the space. A tbl bug.
+
+while(<>) {
+  # Add space in front of line, same bug. But do not if line starts with the our
+  # "escape" character '|', just remove it.
+  print s/^\|// ? $_ : ' ' . $_;
+}
+
+print(".TE\n.pl 0\n");      # Ha! The page was not in fact infinite!
+
+close $groff || die;
+exit 0
+
+__END__
+
+=head1 NAME
+
+format-table - format table with pseudographics using groff and tbl.
+
+=head1 SYNOPSIS
+
+format-table [-h] --header=I<header> [ --title=I<title> ]
+
+  Options:
+    -H, --header     Table header and layout. Required.
+    -T, --title      Table title. No title is formatted by default.
+    -b, --allbox     Draw gridlines between all rows.
+    -h, --help       Full help message.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-H, --header>
+
+Required table column layout and headers. A string of table headings without
+spaces in between, each declaring a table column and its alignment. Each heading
+starts with one of characters C<E<lt>>, C<|>, C<E<gt>> or C<.>, for respective
+left, center, right and decimal point alignments. Anything between these
+characters, including spaces, is considered part of the header.
+
+For a silly example, the header
+
+  <Item name.Price>Quantity.Total
+
+defines four columns:
+
+  'Item name', aligned to the left;
+  'Price', aligned on decimal point;
+  'Quantity', right-aligned;
+  'Total', again, aligned on decimal point.
+
+As an exception, if the line does not begin with any of the alignment
+indicators, the leftmost column is left-aligned.
+
+The heading of a decimal-aligned column is aligned to the right.
+
+=item B<-T, --title>
+
+Optional string to render as the heading of the whole table. The heading is
+centered in a full table-wide cell. By default, no title cell is rendered.
+
+=item B<-b, --allbox>
+
+Render gridlines between every pair of consecutive rows, in addition to the
+columnar gridlines that are always rendered.
+
+=back
+
+=cut

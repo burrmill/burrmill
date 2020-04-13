@@ -1,0 +1,45 @@
+[MASTER]
+init-hook=import sys; sys.path+=['/usr/lib/google-cloud-sdk/lib','/usr/lib/google-cloud-sdk/lib/third_party']
+persistent=no
+
+[REPORTS]
+score=no
+reports=no
+
+[FORMAT]
+indent-after-paren=2
+indent-string='  '
+single-line-class-stmt=yes
+single-line-if-stmt=yes
+max-line-length=80
+
+[BASIC]
+# pywhuckinglint gets really crazy about module globals. Constant, yeah, uhum.
+const-naming-style=any
+function-naming-style=PascalCase
+method-naming-style=PascalCase
+# include-naming-hint=yes
+
+# pylint defaults.
+argument-naming-style=snake_case
+attr-naming-style=snake_case
+class-attribute-naming-style=any
+class-naming-style=PascalCase
+inlinevar-naming-style=any
+module-naming-style=snake_case
+variable-naming-style=snake_case
+
+[DESIGN]
+max-statements=1000
+
+[IMPORTS]
+allow-wildcard-with-all=yes
+
+[LOGGING]
+logging-format-style=new
+
+[EXCEPTIONS]
+overgeneral-exceptions=
+
+[MESSAGES CONTROL]
+disable=locally-disabled,suppressed-message

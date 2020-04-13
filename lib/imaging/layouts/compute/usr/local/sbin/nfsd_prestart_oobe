@@ -1,0 +1,108 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# This program is invoked with root privileges during NFS server startup
+# sequence. It ensures that the exported volume is mounted. If an empty disk is
+# found, then it is formatted and labeled, thus providing transparent OOBE to
+# the user.
+#
+# In case any inconsistencies are found (disk is found but mislabeled, or
+# mounted in a wrong location already, etc.), an alert is logged, and a non-zero
+# exist code is returned, causing NFS startup to fail; no attempt to unmess the
+# mess is done. This should never happen unless the user modified something in
+# the configuration.
+
+set -uo pipefail
+
+. burrmill_common.inc.sh
+
+readonly devname=${1:-filer}   # The device name used when attaching disk.
+readonly label=BURRMILL_FILER  # Filesystem label. Must match /etc/ftab.
+readonly mpoint=/srv/mill      # Mountpoint, matches /etc/{fstab,exports}.
+
+# man lsblk recommends to allow the udev queue settle. We can stop as soon as
+# the dev link for the disk appears. 5s should be plenty of time: The whole
+# normal boot sequence takes about 5 seconds, lock stock and barrel. If the
+# queue does not settle within this time, then something is probably very wrong.
+udevadm settle --timeout=5 --exit-if-exists=/dev/disk/by-label/$label
+
+# Locate the disk by the name it was attached to the instance; GCE exposes it in
+# the 'serial number' field. The resulting array is either empty if the disk was
+# not found, or has 5 elements:
+#  1 = filesystem label, if formatted, else '-'
+#  2 = mountpoint, or '-' if not mounted.
+#  3 = filesystem type ('ext4') or '-' if empty and has none.
+#  4 = device node file ('/dev/sdc'), always present.
+#  5 = size in GB; always present.
+devspec=(
+  $(lsblk --json --bytes --output=LABEL,MOUNTPOINT,FSTYPE,PATH,SIZE,SERIAL |
+      jq -r --arg devname $devname \
+         '.[][] | select(.serial==$devname) | del(.serial)
+                | .size /= 1024*1024*1024 | .[] | . // "-"' ) )
+
+[[ ${devspec-} ]] ||
+  Fatal "No disk with device name '$devname' was not found."
+
+set -- "${devspec[@]}"
+
+new_fs=
+if [[ "$1$2$3" = "---" ]]; then
+  # A fresh disk, must be formatted first.
+  new_fs=y
+  devnode=$4
+  size_gb=$5
+
+  Log notice "Found unformatted disk '$devnode' attached as '$devname'." \
+      "Creating a new ext4 filesystem."
+
+  (( size_gb < 500 )) &&
+    Log warning "The disk size $size_gb GB is too small; even for modest" \
+        "computation jobs, 500GB is the recommended minimum. The disk can" \
+        "be later extended as needed."
+
+  # The size is used only to reserve enough block group descriptors for later
+  # possible online resize; we always make the fs as large as the disk itself.
+  # The reservation will made for the smallest of (2*current size, 3TB).
+  (( size_gb < 1024 )) && size_gb=1024
+
+  mkfs.ext4 \
+      -b4096 -I128 -i$((1024**2)) -j -Jsize=1024 -L$label -m0 -M$mpoint \
+      -Eresize=$((2 * size_gb * 1024**3 / 4096)),root_owner=cluster:burrmill \
+      -Elazy_journal_init=1,lazy_itable_init=0,discard \
+      -O^ext_attr,^extra_isize $devnode ||
+    Fatal "mkfs.ext4 $devnode command failed with exit code $?"
+
+  Log notice "Created a new filesystem on '$devnode' with the label '$label'."
+
+  # We won't need node or size any more.
+  set -- $label '-' ext4
+
+  # Settle the udevadm queue again, or mount might not see the new fs yet.
+  udevadm settle --timeout=5 --exit-if-exists=/dev/disk/by-label/$label
+fi
+
+[[ $1 = $label ]] ||
+  Fatal "The disk attached as device name '$devname' already has a filesystem" \
+        "'$3', but it has a wrong label '$1' (expecting '$label')."
+
+case $2 in
+  $mpoint) exit 0  ;;  # Already mounted at the right mountpoint.
+  '-')
+    mount --target $mpoint ||
+      Fatal "Disk '$label' mount failed with exit code $?." \
+            "See man mount(8) for the explanation of error codes." ;;
+  *)
+    Fatal "The disk attached as device name '$devname' has the correct label" \
+          "'$label' but is already mounted at '$2' (expecting '$mpoint')." ;;
+esac
+
+# Iff we have just created a new fs, pre-populate top-level directories.
+if [[ $new_fs ]]; then
+  mkdir -p $mpoint/burrmill/{etc,data,home}
+  chown -R user:burrmill $mpoint
+fi
+
+exit 0

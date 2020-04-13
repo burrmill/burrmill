@@ -1,0 +1,164 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# If you have been pointed to this file by the note in the skeleton
+# etc/build/Millfile, read on. If not... well, read on, too. I cant come up
+# with a 1-2 line TL;DR for this file, but PRs are indeed welcome!
+
+# This is a standard BurrMill Millfile. It defines the target configuration of
+# the Common Node Software (CNS) disk. The counterpart user's Millfile may be
+# placed into etc/build/Millfile, and used to modify the configuration.
+#
+# This file is read the first, but the last directive wins, so the user's file
+# has a higher precedence.
+
+# Comment start anywhere on the line with the '#' sign. Any whitespace preceding
+# the octothrop character is discarded, and empty lines (after slashing the
+# hashes) have no effect.
+#
+# Each line starts with a directive that determines the syntax of the rest of
+# line. Lines may be continued by braking it at any point and starting the next
+# one with whitespace. Backslashes at end of line are NOT used. As a side effect
+# of the comment handling, a comment is allowed between a directive line and
+# it's continuation, e.g.,
+#
+#   ! <- column before 0, i.e. left border of the screen or editor window.
+#   !image cuda 10.1.2    _CUDA_VER : :  # Be very careful that the URL
+#   !              # indeed matches the declared version, as we have no
+#   !              # programmatic way to assert that the versions match!
+#   !  _CUDA_SOURCE_URL=http://nvidia.com/cuda/10.1/cuda_10.1.243.run
+#
+# In this example, "image cuda 10.1.2 _CUDA_VER : : _CUDA_SOURCE_URL=http://nvidia.com/cuda/10.1/cuda_10.1.243.run"
+# is a single directive with a continuation, and intervening comments are
+# ignored.
+
+# Full directives define a software package put into the CNS. It consists of up
+# to 3 sections, separated by the colon. Space after the colon is mandatory,
+# before is optional but recommended. If the whole trailing section is missing,
+# it's semicolon may be optionally omitted. That is, the structure of these
+# directives is:
+#
+# Section_1 [ : [ Section_2 ] [ [ : [ Section_3 ] ] ]
+# Section_1  consists of 2 to 4 whitespace-separated tokens:
+#   1 = tar | image | builder. The type of the artifact.  Docker images are not
+#       used in BurrMill at runtime. Rather, the purpose is twofold.  First, at
+#       the build time, an image (such as mkl or cuda) is combined with the cxx
+#       builder to provide a build environment with these libraries. Second,
+#       when building the CNS disk, images serve the same purpose as tarballs:
+#       they are simply extracted to the CNS root. This way, we prevent separate
+#       artifacts for the same version of some software be kept in two
+#       independent places. Also saves you a few bucks a month, too. The keyword
+#       'builder' indicates a Cloud Build builder; it is treated the same way as
+#       image during build but is excluded from deployment.
+#   2 = name, mandatory. For image, it refers to the project registry, for a
+#       tarball, the file thus named under the
+#       gs://<software>/tarballs/<name>.tar.gz.
+#   3 = version, optional, but highly recommended. For an image, this is the
+#       Docker image tag (e.g. 'mkl:2019.4'. For the tarball, it is the version
+#       metadatum on the object named <name>.tar.gz. As a fallback, a tarball
+#       named <name>-<version>.tar.gz is also considered, as long as it does NOT
+#       have the the version metadatum. If this field is not provided, the tag
+#       ':latest' is used for a Docker image. For a tarball, this is not
+#       well-defined, so do always version tarballs.
+#   4 = Not allowed if no version, optional (but recommended) if there is. This
+#       variable is assigned the field 3 during build.
+# Section_2:
+#   [dependency ...]
+#   Which lines from the Millfile should be completely built strictly before
+#   this one. For example, kaldi requires the cxx builder, cuda and mkl. If
+#   omitted, the target does not depend on any other.
+# Section_3:
+#   [_VARIABLE=value ...]
+#   Other build variables. If none, then none passed to build, otherwise they
+#   replace those from the 'substitutions' section in the cloudbuild.yaml file.
+
+
+# Note that this pins Kaldi to some version that I user in my experiments.
+# You are likely to update it to a latest one. However, keeping it unchanged
+# during your whole experiment is a good idea.
+
+tar kaldi  6f329a62e  _KALDI_VER : cxx mkl cuda
+
+# Do not simply upgrade Slurm because it's newer. Better open a feature request
+# at https://github.com/burrmill/burrmill/issues/new?template=fr-other.md
+# if you find the reason it should be. The version pinned here went thorough
+# real practical computation many times. Also, there is a patch file in its
+# build directory that should cleanly apply.
+
+tar slurm 19.05.4-1 _SLURM_VER : cxx
+
+# The cxx is a builder, and it is unversioned. It will never be rebuilt by
+# Burrmill automatically. You'll maintain it. Read the docs on the cxx builder.
+# TODO(kkm): LINK: Add link to the decs when it's done (0.7-beta)
+
+builder cxx
+
+# Feel free to use a fresher MKL. The only reason to do that is it may be higher
+# optimized for the new CPUs, *if* they are offered in GCE and in your location.
+# Otherwise, it works, so don't fix it.
+
+image mkl  2019.5    _MKL_VER
+
+# CUDA is more complex: It does not have a consistent versioning or a consistent
+# download location. How do I know that v10.1 Update 2 is actually the version
+# v10.1.243-478.87.00? And what is its download URL? I do not. Refer to the
+# table at https://100d.space/cuda-versions. The v10.1.2 fully covers all GPU
+# architectures up to the latest offered by Google (T4, sm_75), and you can use
+# it without modification until never GPUs would be available, and you'd want to
+# use them. Also, it must be compatible with the drivers installed in the
+# compute machine image file. Again, better open an issue with us, so that we
+# can have it updated for everyone.
+
+image cuda 10.1.2    _CUDA_VER  : :  # Line continues with space in next line.
+ _CUDA_SOURCE_URL=http://developer.download.nvidia.com/compute/cuda/10.1/Prod/local_installers/cuda_10.1.243_418.87.00_linux.run
+
+# A directive 'tar' or 'image' calling the same name completely replaces the one
+# named before it. If you put 'image cuda ...' in your Millfile, the one just
+# above this comment will have no effect.
+
+# The two remaining directives have no colon-separated sections. These are
+# usually found in the user's Millfiles, and modify the common config defined in
+# this file.
+
+# The 'ver' directive: update version.  Very useful for kaldi, when you want to
+# shift your "pinned" version to a newer (or older) one. The format is:
+#
+#    ver <name> <version> [ _VAR1=<new_value> [ _VAR2=<new_value ... ] ...]
+#
+# For example, if you keep your own Kaldi repo's clone with tags for certain
+# versions that you did deep experiment with, you can pin the version to a tag
+# instead of the SHA hash, but you need to tell the build that the repo that
+# is different: from declared by default.
+#
+#ver kaldi multiling-2 _KALDI_REPO=git://github.com/myown/kalgi.git
+#
+# Or you can simply pin Kaldi to a hash, using the default repository:
+#
+#ver kaldi feefaaf00
+
+# The 'skip' directive is useful if you want to temporarily omit some component
+# from the build. It's rarely used, but I had use cases when I resolved
+# component dependency requirements, and that was easier by excluding most and
+# them bisecting adding the rest, so I leave the implementation in, hoping it
+# would save you a couple hours if you crash-land on the same filed.  It's and
+# 'advanced' directive, as you should understand the consequences. Skip only the
+# components that are not dependencies of other, non-skipped packages. For an
+# extremal example, if you 'skip cxx', you won't be able to build practically
+# anything at all (and the build will be very angry at you!)
+#
+# The directive simply takes one or more targets to skip, like
+#
+#   skip srilm sctk dotnet
+#
+# A final word, do not consider the size of packages a limiting factor. Your CNS
+# disk will be 20 to 100 GB in size for performance reasons, not the capacity
+# limit, and most of it will be empty anyway. A fully static, 15GB+ build of
+# Kaldi still allows for a 20GB CNS disk, and 20GB is probably the lowest
+# practical size, as GCE disk performance scales linearly with its size (to a
+# certain point, but we are well below it).
+
+# The "system" lib/build/Millfile contains most of the required software; use
+# the file etc/build/Millfile to add more and to pin the system-provided version
+# to some revision. We recommend pinning Kaldi to a specific version during an
+# experiment, to make sure your results are not affected by changes in the code,
+# unless you need a fix for a specific bug.

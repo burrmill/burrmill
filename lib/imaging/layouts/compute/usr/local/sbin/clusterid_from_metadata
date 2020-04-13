@@ -1,0 +1,21 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# Obtain cluster-related metadata and add them to system unit environment.
+# Currently, only the 'cluster' attribute is extracted and added under the
+# variable name BURRMILL_CLUSTER.
+
+# TODO(kkm): Consider also getting the project and zone, to make them available
+#            to Slurm-invoked scripts without a metadata query.
+
+. burrmill_common.inc.sh
+
+cluster=$(MetadataOrDie instance/attributes/cluster) ||
+  Fatal "Unable to obtain cluster name from metadata"
+
+/bin/systemctl set-environment "BURRMILL_CLUSTER=$cluster" \
+                               "BURRMILL_FILER=${cluster}-filer"
+# Exit code is that of systemctl.

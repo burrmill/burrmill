@@ -1,0 +1,7 @@
+# This file was installed by BurrMill.
+#
+# Empty file to mask out a file with same name that comes in some distros. We
+# set the elevator to noop in kernel command line, and we journald and do not
+# syslog.  The main reason to remove the package file is that it was buggy, an
+# attempted resetting the elevator not only on disks, but on partitions also,
+# resulting in a slew of logged errors.

@@ -1,0 +1,420 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+source common.inc.sh
+source cluster.inc.sh
+source daisy.inc.sh
+source parseopt.inc.sh
+
+set -euo pipefail
+
+# Options common to all programs.
+argp_common_options="
+ Common options:
+d,debug?N            Print verbose messages; the larger the N, the merrier.
+n,dry-run            Do not run commands, but show what would be done.
+y,yes!               Skip confirmation of less important actions.
+"
+
+# We'll RYO output, because we analyze the names anyway, and gcloud with the
+# default table format prints nothing if no images found, which looks confusing.
+# Pass '-l' to get only in-family images. Other arguments are passed to gcloud.
+_ListImages() {
+  local filter=
+  [[ ${1-} == -l ]] &&
+    { filter="--filter=family=$image_family_compute"; shift; }
+  $GC images list "$@" \
+      --no-standard-images --sort-by=~creationTimestamp $filter --format='
+         json(name,family,
+              creationTimestamp.date(format="%y-%m-%d %H:%M:%S",tz=))'
+}
+
+#==============================================================================#
+# The list command.
+#==============================================================================#
+
+CmdList() {
+  local argspec="\
+$my0 [<common-options>] list [<options>]
+
+List images in the $image_family_compute family, or all OS images in project.
+--
+ The 'list' command options:
+a,all              Show images in all families.
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A0 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  local flt= infam= count jlist
+  [[ $OPT_all ]] || { flt=-l; infam=" in family $(C c $image_family_compute)"; }
+
+  # Read list, optionally filtered.
+  jlist=$(_ListImages $flt)
+  count=$(Jq -r "$jlist" length)
+  ((count == 0)) && {
+    Say "No images${infam} exist yet in project '$(C c)$project$(C)'. Build" \
+        "one with '$(C c)$my0 build$(C)'"; return 0; }
+
+  Say "Images${infam} in project $(C c $project)"
+  if [[ $OPT_all ]]; then
+    Jq -r "$jlist" '.[] | [(.name,.family,.creationTimestamp)] | @tsv' |
+      format-table -H'<IMAGE NAME<IMAGE FAMILY<CREATED (local)'
+
+    # Count out-of-family images, print notice if any.
+    count=$(Jq -r --arg fam $image_family_compute "$jlist" '
+               map(select(.family != $fam)) | length')
+    (( count > 0 )) &&
+      Say "Our scripts do not create images outside of the family" \
+          "$(C c $image_family_compute).${LF}If you do not recognize any of" \
+          "these images, use the following command to remove"\
+          "them:${LF2}   $(C c)$GC images delete $(C y)<image>...$(C)$LF1"
+  else
+    jq <<<"$jlist" -r '.[] | [(.name,.creationTimestamp)] | @tsv' |
+      format-table -H'<IMAGE NAME<CREATED (local)'
+    count=$(Jq -r "$jlist" length)
+    (( count <= 2)) ||
+      Say "Consider deleting all but 2 latest images using '$(C c $my0 prune)'"
+  fi
+}
+
+#==============================================================================#
+# The prune command.
+#==============================================================================#
+
+CmdPrune() {
+  local argspec="\
+$my0 [<common-options>] prune [<options>]
+
+Prune older image versions in the $image_family_compute family.
+
+We recommend keeping 2 latest images, so that you can easily switch to the
+previous configuration in case the new image version does not work as desired.
+After a while, you may want to leave only one. The latest image is used to start
+compute nodes, so one has to be present always.
+
+In case the latest image does not work, delete it using the command
+
+  $GC images delete <image-name>
+
+then perform a new rollout with '$my0 rollout'.
+--
+ The 'prune' command options:
+c,count=N   Number of images to keep. Without the switch, keep 2 images.
+
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A0 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  local -i total count=${OPT_count:-2}
+  (( count >= 1 )) ||
+    Die "Invalid count $count, refusing to delete all images"
+
+  jlist=$(_ListImages -l)
+  Dbg2 $'Image list:\n'"$jlist"
+  total=$(Jq "$jlist" length)
+
+  (( total > 0 )) ||
+    Die "Project '$(C c)$project$(C)' has no images in family" \
+        "'$(C c)$image_family_compute$(C)'"
+
+  jlist=$(Jq --argjson c $count "$jlist" '
+      .[:$c] |= map(. += {del:false, hl:"green", op:"KEEP"})
+    | .[$c:] |= map(. += {del:true,  hl:"red",   op:"DELETE"})')
+  Dbg2 $'Augmented image list:\n'"$jlist"
+
+  Say "Requested image pruning as follows:"
+  Jq -r "$jlist" '
+        .[] | "\(.name)\t\(.creationTimestamp)\t\\m[\(.hl)]\(.op)\\m[]"' |
+    format-table -H'<IMAGE NAME<CREATED (local)<STATE'
+
+  (( count >= total )) &&
+    { Say "Keeping all images, nothing to prune"; return; }
+
+  Say "Deleting $(C r $((total-count)) oldest)," \
+      "keeping $(C g $((count)) newest) images"
+  [[ $OPT_yes ]] || Confirm -y "Continue" || return
+
+  $GC images -q delete $(Jq -r "$jlist" '.[]|select(.del).name')
+}
+
+#==============================================================================#
+# The build command.
+#==============================================================================#
+#
+# We package two kinds of tarballs. First, there are layouts which are deployed
+# to the future OS image disk as-is: the root of a layout is extracted to the
+# root of the disk in ./lib/imaging/scripts/1-bootstrap_layout.sh which is run
+# in the first prep phase. The layouts are extracted in the alphabetical order.
+# To control the order, we add a prefix to the tar filename: '0-' for the system
+# layout from ./lib/imaging/layouts/ (where each subdirectory is packed as a
+# separate layer), and '1-' to those from ./lib/imaging/layouts/ if the user has
+# added any. This is so that user files overwrite our files, if they wish so.
+#
+# Second, there is a single addons.tar.gz, which is combined from the files in
+# ./{lib,etc}/imaging/addons/ directories (whichever are present). This tarball
+# is extracted to the directory ./bootstrap on the target drive. All files in
+# this archive have a special meaning, all are optional, and are interpreted
+# differently. The '*' before the name indicated that we currently have, deploy
+# and use this script.
+#
+#   ./1_post_layout         -- executed on the 'boot' (1st phase) machine
+#   ./1_user_post_layout    -- same; executed after the system script.
+# * ./user_vars.inc.sh      -- set user variables for phase 2 (e.g. timezone).
+#   ./dpkg/*.deb            -- Additional deb packages not available in feeds.
+#
+# Note that the script packages everything in these directories, so common
+# includes, for example, are possible.
+#
+# The phase 1 script will warn if there are any other files except the numbered
+# layer archices and the addons.tar.gz, but this is not considered fatal.
+
+CmdBuild() {
+  local argspec="\
+$my0 [<common-options>] build
+
+Build a new base image version in the $image_family_compute family.
+
+Layouts are taken from system lib/imaging/layouts and, if present, from user's
+etc/imaging/layouts. The latter are applied after system layouts, and each
+group is applied in the alphabetical order within it.
+
+The following files let you augment the build process. Refer to the
+documentation for more info on them:
+
+ lib/build/addons/1_post_layout -- executed on the 'boot' (1st phase) machine.
+ etc/build/addons/1_user_post_layout -- same; your additional script.
+ etc/build/addons/user_vars.inc.sh   -- add packages and set timezone there.
+ lib/build/addons/dpkg/*.deb    -- Additional deb packages (system)
+ etc/build/addons/dpkg/*.deb    -- Additional deb packages (user)
+
+--
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A0 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  local _PackLayouts count jlist suffix
+
+  GetProjectGsConfig
+
+  # Try to figure out suffix from the newest image. We stick to the format
+  # 'burrmill-compute-v002-191204', but it's possible there are no images
+  # yet, or the name does not parse; start at v001 then.
+  jlist=$(_ListImages -l --limit=1)
+  suffix=$(Jq -r "$jlist" '.[0].name?' |
+             perl -ne 'use POSIX (strftime);
+                       $n = /-v(\d\d\d)-/ ? $1+1 : 1;
+                       $d = strftime "%y%m%d", localtime;
+                       printf "v%03d-$d\n", $n')
+
+  SayBold "Building compute image $(C c)$image_family_compute-$suffix$(C w)."\
+          "This will take 10-15 minutes."
+
+  # This function is invoked by RunDaisy with $PWD in the temp directory.
+  # Package layouts into the ./layouts subdirectory: this is where the workflow
+  # script expects to find them.
+  _PackLayouts() {
+    # Provides an indexed name: 0=lib, 1=etc. Larger numbers applied later.
+    local n=0 packed_any= tarv=
+    shopt -s nullglob
+
+    mkdir layouts || return
+
+    [[ OPT_debug_1 ]] && tarv+=v
+    [[ OPT_debug_2 ]] && tarv+=vv
+
+    for prefix in lib etc; do
+      for src in $BURRMILL_ROOT/$prefix/imaging/layouts/*/; do
+        dst=$n-$(basename $src)
+        Say "Packaging layout '$(C c)$dst$(C)' from '$(C c)$src$(C)'"
+        tar ca${tarv}f layouts/$dst.tar.gz --owner=0 --group=0 --sort=name \
+            --exclude='README*' --exclude='*/.gitignore' \
+            -C "$src" . || return
+        packed_any=y
+      done
+      let ++n
+    done
+
+    [[ $packed_any ]] ||
+      Die "Did not find any layouts. BURRMILL_ROOT='$BURRMILL_ROOT'. Looked" \
+          "in '$BURRMILL_ROOT/lib/imaging/layouts/*/' and" \
+          "'$BURRMILL_ROOT/lib/imaging/layouts/*/'. This is likely a bug."
+
+    # Package the addons archive if any of the directories is present.
+    local -a add_dirs=()
+    for prefix in lib etc; do
+      if [[ -d $BURRMILL_ROOT/$prefix/imaging/addons ]]; then
+        add_dirs+=( -C $BURRMILL_ROOT/$prefix/imaging/addons . )
+      fi
+    done
+    if [[ ${add_dirs-} ]]; then
+      dst=addons.tar.gz
+      Say "Packaging '$(C c)$dst$(C)' from "\
+          "$(C c)${add_dirs[1]}$(C) $(C c)${add_dirs[4]-}$(C)"
+        tar ca${tarv}f layouts/$dst --owner=0 --group=0 --sort=name \
+            --exclude='README*' --exclude='*/.gitignore' \
+            "${add_dirs[@]}" || return
+    fi
+  }
+
+  RunDaisy -s $image_family_compute \
+           -c _PackLayouts \
+           -v "family=$image_family_compute,suffix=$suffix" \
+           image_twophase ||
+    Die "Daisy build failed.
+Look at the output above, and find a message 'Daisy scratch path' with a \
+direct link to the log folder.
+If not found, look for files in this location:
+
+https://console.cloud.google.com/storage/browser/${gs_scratch#*//}/$image_family_compute/?project=$project
+
+Usually the failure happens at the second phase. Look for the log with the \
+words 'target' and 'serial' in filename.
+Search for the string '+ E' in it; usually the failure cause can be spotted \
+right above this line.
+"
+  jlist=$(_ListImages -l)
+  Say "Current inventory of images in family $(C c $image_family_compute):"
+  Jq -r "$jlist" '.[] | [(.name,.creationTimestamp)] | @tsv' |
+    format-table -H'<IMAGE NAME<CREATED (local)'
+
+  count=$(Jq -r "$jlist" length)
+  (( count <= 2)) ||
+    Say "Consider deleting all but 2 latest images using '$(C c $my0 prune)'"
+}
+
+#==============================================================================#
+# The rollout command.
+#==============================================================================#
+
+CmdRollout() {
+  local argspec="\
+$my0 [<common-options>] rollout [<cluster> ...]
+
+Roll-out the latest OS image to clusters.
+
+$(C w)Note that rollout currently resets Slurm state completely.$(C) This means\
+ that any
+information about jobs pending start in the Slurm database will be lost. This is
+consistent with the way Kaldi uses the cluster.
+
+If you think that your pattern of use requires keeping the cluster state during
+base image change, please open an issue with us. It is not technically hard to
+support this scenario; the way we ever used the clusters did not ever require
+persisting the state across controller rebuilds.
+
+The clusters must be powered off.
+
+If no arguments are passed, your default cluster will be reimaged. Otherwise,
+you can name one or more existing clusters to reimage.
+
+If the command fails or gets interrupted, the cluster will likely end up in an
+inconsistent state. bm-power will refuse to turn its power on. In this case,
+run the command 'bm-deploy fix <cluster-name>' to repair the cluster. Use tmux
+or screen, or run the command from the Cloud Console to prevent a failre due to
+a network connection loss.
+--
+ The rollout command options
+a,all    Reimage all powered off clusters
+$argp_common_options"
+
+  ArgParse -g2 -a0 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  local any cluster go err tmp
+  case $OPT_all:$# in
+     :0) tmp=$(GetAndCheckCluster -e0)  # Skip error check, we'll do it later.
+         set -- $tmp ;;
+     :*) ;;  # A list is given on command line; take it for what it is.
+    ?:0) tmp=($(GetLikelyUsableDeployments))
+         set -- ${tmp[@]} ;;
+    ?:*) Die "Positional arguments may not be used with --all" ;;
+  esac; unset tmp
+
+  (( $# == 0 )) &&
+    Die "No usable cluster were found. Verify that the names on command line" \
+        "are valid"
+
+  # Check common prerequisites. We do not need the CNS disk here, keep existing.
+  VerifyPrereqsAndGetCnsDisk >/dev/null
+
+  OPT_strict=y  # Enforce stricter state check.
+  upcount=0
+  for cluster; do
+    SayBold "Preparing to roll out new boot image to cluster '$(C c)$cluster'"
+    Say "Checking health of cluster '$(C c)$cluster'"
+    # Just call the verifier, and ignore output JSON, we have no use for it.
+    err=0; LoadAndValidateClusterState "$cluster" >/dev/null || err=$?
+    go=
+    case $err in
+      0) Say "The cluster is healthy, ok to proceed.";
+         go=1  ;;
+      1|2) Error "Unspecific error, likely uncorrectable (e.g, " \
+                 "a non-exiting cluster)." ;;
+      8) Say "Despite this error, we'll likely recover from this state"
+         go=2 ;;
+      *) Error "This tool is unlikely to recover from the error reported," \
+               "use 'bm-deploy fix <cluster name> for the more thorough fix"
+    esac
+    [[ $go ]] || continue;
+
+    SayBold "Please do not interrupt the operation.$(C)${LF}If you are" \
+            "working remotely, tmux or screen is a good option. The Cloud" \
+            "Shell${LF}uses tmux, so you should be able to reconnect in case" \
+            "the connection is lost."
+
+    # Step 1 is update the manifest with 'with_boot_disk=false'. This will force
+    # DM to detach and delete boot disks (see the template in lib/deploy). In
+    # case of error 8 (Manifest is missing the boot disk), it is likely ok to
+    # skip this step, as it will be a noop anyway.
+
+    (( go <= 1 )) && {
+      SayBold "Removing old boot disks from cluster $(C c)$cluster"
+      GdmUpdateDeployment 1 $cluster with_boot_disk:false; }  &&
+    (( go <= 2 )) && {
+      SayBold "Creating and attaching new boot disks to cluster $(C c)$cluster"
+      GdmUpdateDeployment 2 $cluster with_boot_disk:true; } &&
+    let ++upcount || true
+  done
+
+  Say "$(C w)$upcount of $#$(C) cluster(s) were updated."
+  return $(( $upcount == $# ))
+}
+
+#==============================================================================#
+# The tool entrypoint.
+#==============================================================================#
+
+argspec_top="\
+$my0 [<common-options>] <command> [<command-options>] [<command-args>...]
+$my0 <command> --help  # Get help on individual commands.
+
+Build, list and prune BurrMill compute node OS images .
+
+<command> is one of:
+  build   - Build a new version of the base image.
+  list    - List available images.
+  prune   - Remove older images.
+  rollout - Rebuild filer/control nodes boot disks with the latest image.
+
+The common options are accepted either before or after the command.
+All long options and command names can be shortened to an unambiguous prefix.
+--
+$argp_common_options"
+
+ArgParse -uc'build list prune rollout' -dlist "$argspec_top"
+
+verb=${POPT_ARGV-}
+unset POPT_ARGV[0]
+
+case $verb in
+  build)   CmdBuild   ;;
+  list)    CmdList    ;;
+  prune)   CmdPrune   ;;
+  rollout) CmdRollout ;;
+  *) Die "$my0:$LINENO:internal error:command verb '$verb' case missing"
+esac

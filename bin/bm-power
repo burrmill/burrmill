@@ -1,0 +1,530 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# This tool manages cluster deployments: initial deployment of cluster machines,
+# changing Slurm and node configuration, and deployment of reimaged boot disks.
+#
+# This is a highly interactive program, not intended for scripting.
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+source common.inc.sh
+source cluster.inc.sh
+source parseopt.inc.sh
+
+shopt -s extglob
+set -euo pipefail
+
+RequireInteractive
+
+GCI="$GC instances"
+
+declare cluster jsnodestate
+
+#==============================================================================#
+# Options common to all commands.
+#==============================================================================#
+
+argp_common_options="
+ Common options (applicable to most but not all commands):
+d,debug?N            Print verbose messages: N={1,2}, the larger, the merrier.
+w,wait               Wait for the operations to complete.
+y,yes!               Skip confirmation on less important actions.
+strict*              hidden: Make some warnings errors. Only used by bm-deploy.
+"
+
+#==============================================================================#
+# The On command and common power-up routine for 'on', 'high' and 'low'.
+#==============================================================================#
+
+_PowerClusterOn() {
+  : ${cluster?} ${jsnodestate?}  # Assert variables set.
+  local async= to_start
+  to_start=($(Jq -r "$jsnodestate" \
+      '(.pwr_level != "LOW") as $nlo
+       | .n_main[] | select(.status == "TERMINATED" and
+                            ($nlo or .role != "control")).selfLink'))
+  if [[ ! ${to_start-} ]]; then
+    Say "Cluster is already powered $(C g ON)"
+  else
+    JqTest "$jsnodestate" '.pwr_level == "LOW"' &&
+      Say "The controller is not being started because the power mode" \
+          "is set to $(C c LOW)."
+    Say "Starting nodes: $(C c)${to_start[@]##*/}$(C)"
+    # Listing of GCE operations reported with --async is uninformative.
+    [[ $OPT_wait ]] || async='--async --no-user-output-enabled'
+    $GCI start $async "${to_start[@]}"
+    [[ $OPT_wait ]] ||
+      Say "Asynchronous request to start $(C c)'${to_start[@]##*/}'$(C) sent."
+  fi
+}
+
+CmdOn() {
+  local argspec="\
+$my0 [<common-options>] on [<options>] [<cluster>]
+
+Turn main cluster nodes on. Use your default cluster if <cluster> is omitted.
+--
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  cluster=${1:-$(GetAndCheckCluster)}  # Exits on error.
+  jsnodestate=$(LoadAndValidateClusterState)
+  _PowerClusterOn
+}
+
+#==============================================================================#
+# The High and Low command and their common implementation
+#==============================================================================#
+
+# _CmdLowHighImpl 0 "$argspec"; 0=low, 1=high, the index to machine type in the
+# 'config.power.{filer,login}' arrays.
+_CmdLowHighImpl() {
+  local pwrix=${1?}               # 0 or 1.
+  local lohi=('LOW' 'HIGH')       # Indexable by $pwrix.
+  local pwr_level=${lohi[$pwrix]} # LOW or HIGH.
+
+  ArgParse -g2 -a0 -A1 "${2?}"
+  set -- "${POPT_ARGV[@]}"
+
+  cluster=${1:-$(GetAndCheckCluster)}
+  jsnodestate=$(LoadAndValidateClusterState)
+  : ${cluster?} ${jsnodestate?}  # Assert set variables.
+
+  JqTest "$jsnodestate" '.config|length>0' ||
+    Die "Cannot select high/low power without the runtime config record."\
+        "Check the warning printed above."
+
+  [[ $(Jq -r "$jsnodestate" \
+          '.n_main | map(.status) | unique | join(":")') = TERMINATED ]] ||
+    Die "Cluster $(C c)$cluster$(C) must be powered off to change power level"
+
+  # Figure out minimum required changes, as 3-tuples (name, new machine type,
+  # self-link) per tab-separated line. --argjson passes o or 1 as integers to
+  # the jq program; --arg would pass them as strings instead.
+  changes=$(Jq -r --argjson pwrix $pwrix "$jsnodestate" '
+    .config.power as $cfg
+    | .n_main[]
+    | ($cfg[.role][$pwrix]//.machineType) as $newmach
+    | select(.machineType != $newmach)
+    | [.name, $newmach, .selfLink] | @tsv')
+  if [[ ! $changes ]]; then
+    Say "Cluster '$(C c)$cluster$(C)' is already in" \
+        "$(C c)${lohi[$pwrix]}$(C)-power state"
+  else
+    Dbg1 $'Changes to apply:\n'"$changes"
+    local name machtype uri
+    while read -r name machtype uri; do
+      Say "Changing $(C c)$name$(C) machine type to $(C c)$machtype$(C)"
+      $GCI set-machine-type $uri --machine-type=$machtype
+    done <<<"$changes"
+
+    # Update $jsnodestate to skip re-reading.
+    jsnodestate=$(Jq -c --arg pwr_level $pwr_level "$jsnodestate" \
+                     '. += {pwr_level: $pwr_level, pwr_same: true}')
+  fi
+
+  Say "Powering up the cluster $(C c)$cluster"
+  _PowerClusterOn
+}
+
+CmdLow() {
+  local argspec="\
+$my0 [<common-options>] low [<options>] [<cluster>]
+
+Configure and turn on main cluster nodes in low-power mode. The controller
+is not run. Use your default cluster if <cluster> is omitted.
+--
+$argp_common_options"
+
+  _CmdLowHighImpl 0 "$argspec"
+}
+
+CmdHigh() {
+  local argspec="\
+$my0 [<common-options>] high [<options>] [<cluster>]
+
+Configure and turn on main cluster nodes in high-power mode, ready to run
+the computation. Use your default cluster if <cluster> is omitted.
+--
+$argp_common_options"
+
+  _CmdLowHighImpl 1 "$argspec"
+}
+
+#==============================================================================#
+# The Kill command
+#==============================================================================#
+
+CmdKill() {
+  local argspec="\
+$my0 [<common-options>] kill [<cluster>]
+
+This is a heavy-handed command that stops main nodes and forcibly kills compute
+nodes. It must be used $(C y only in case of an emergency). This is akin to \
+cutting
+the mains off to the machines; the computation will be disrupted. Also note that
+$(C y cluster configuration will be deleted), otherwise Slurm would respawn \
+nodes and
+complete the jobs on the next power-on. The 'bm-deploy config' command must be
+used to restore the configuration after manual clean-up of the controller.
+
+A much better way to stop an incorrectly submitted request is to use the Slurm
+'scancel' command, that cancels the jobs quickly under normal conditions. This
+command has been never used by us, and exists only to prevent some unforeseen
+runaway scenario accruing your costs quickly and uncontrollably. Please talk to
+us by opening an issue if you had to use this command, and for help with
+recovery.
+
+Use your default cluster if <cluster> is omitted.
+--
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  cluster=${1:-$(GetAndCheckCluster)}  # Exits on error.
+  jsnodestate=$(LoadAndValidateClusterState -p)
+
+  local async= to_stop s t
+
+  Warn "$(C y)Pulling the power plug is an extreme measure.$(C) Use the" \
+       "Slurm${LF}'$(C c)scancel$(C)' command if at all possible. The" \
+       "cluster configuration will be deleted,${LF}and you'll have to" \
+       "restore it using the '$(C c)bm-deploy config$(C)' command after" \
+       "the${LF}root cause has been identified and eliminated.$LF1"
+
+  Confirm "Continue killing cluster '$(C c)$cluster$(C)' power" || exit 0
+
+  Warn "Performing the kill operation, which is very disruptive.${LF}You" \
+       "have 5-10 seconds to press Ctrl+C while we are doing the least" \
+       "nuclear part.${LF}After that, do not try to manually intervene" \
+       "until this command has finished."
+
+  # LoadAndValidateClusterState will certainly not return success, and we need
+  # to reload the state a few times during the operation. So no -e.
+  set +e
+
+  # Force stop. First turn off the controller, but do not touch filer, since a
+  # hung NFS will wreak more havoc and only slow down shutdown.
+  t=$((SECONDS + 10))  # Ensure the user has the promised 10 seconds.
+  SayBold "Stopping control nodes except the NFS server"
+  to_stop=($(Jq -r "$jsnodestate" \
+                 '.n_main[] | select(.role != "filer" and
+                                     .status != "TERMINATED").selfLink'))
+  if [[ ${to_stop-} ]]; then
+    Say "Stopping nodes synchronously: $(C c)${to_stop[@]##*/}$(C)"
+    $GCI stop "${to_stop[@]}" || true
+  fi
+  [[ ${to_stop-} ]] && jsnodestate=$(LoadAndValidateClusterState -p &>/dev/null)
+  t=$((t - SECONDS)); ((t > 0)) && sleep $t || true
+
+  # Make sure we give the GCE at the least 20 seconds to stop spawning nodes
+  # after the controller has positively stopped; some of the state is only
+  # eventually-consistent. 20s is an overkill, but the tail is always long.
+  t=$((SECONDS + 20))
+  SayBold "Locating and killing off compute nodes."
+  # We cannot bulk-query and try to delete the nodes, because 'gcloud stop'
+  # does not handle non-existing instances well, and the compute nodes may
+  # disappear between the query and their use in the 'GCI delete'
+  to_stop=($(Jq -r "$jsnodestate" '.n_compute[].selfLink'))
+  for s in "${to_stop[@]}"; do
+    Say "Deleting: $(C c)${s##*/}$(C)"
+    timeout 45s $GCI &>/dev/null delete -q "$s" &
+    sleep 0.8  # Do not exceed request rate.
+  done
+  wait || true
+  t=$((t - SECONDS))
+  # Do not wait if there is nothing to stop.
+  [[ ${to_stop-} ]] && ((t > 0)) && sleep $t
+
+  # It's possible that new nodes popped up while the controller was stopping.
+  [[ ${to_stop-} ]] && jsnodestate=$(LoadAndValidateClusterState -p &>/dev/null)
+
+  trap '' INT
+  Warn "$(C y)Please do not interrupt the command from this point on."
+
+  # This will prevent slurm controller from starting.
+  WARN "Deconfiguring cluster '$(C c)$cluster$(C)' to prevent Slurm from" \
+       "starting. Run '$(C c)bm-deploy config$(C)' later to restore"
+  $GC project-info remove-metadata --key=${cluster}_slurm_config
+
+  to_stop=($(Jq -r "$jsnodestate" '.n_compute[].selfLink'))
+  [[ ${to_stop-} ]] ||
+    Say "All compute nodes have been successfully deleted."
+  for s in "${to_stop[@]}"; do
+    Say "Resetting and deleting: $(C c)${s##*/}$(C)"
+    ( $GCI &>/dev/null reset -q "$s";
+      $GCI &>/dev/null delete -q "$s" ) &
+    sleep 0.8  # Do not exceed request rate.
+  done
+  wait || true
+  [[ ${to_stop-} ]] && jsnodestate=$(LoadAndValidateClusterState -p &>/dev/null)
+
+  SayBold "Lastly, stopping the NFS server node"
+  # Actually, stop any active of the main nodes, just in case.
+  to_stop=($(Jq -r "$jsnodestate" \
+                '.n_main[] | select(.status != "TERMINATED").selfLink'))
+  if [[ ${to_stop-} ]]; then
+    Say "Stopping $(C c)${to_stop[@]##*/}$(C) synchronously"
+    $GCI stop "${to_stop[@]}"
+  fi
+
+  SayBold "'$my0 kill' command complete.$(C)${LF}Check $(C c)'$my0" \
+          "show $cluster'$(C) to make sure everything is quiet. Some code" \
+          "paths of the${LF}emergency stop route are hard to test in" \
+          "non-simulated scenarios, so give us some${LF}slack and do an" \
+          "extra check. Then contact us for assistance."
+
+  trap - INT
+}
+
+#==============================================================================#
+# The Off command
+#==============================================================================#
+
+CmdOff() {
+  local argspec="\
+$my0 [<common-options>] off [<options>] [<cluster>]
+
+Turn main cluster nodes off. Use your default cluster if <cluster> is omitted.
+--
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  cluster=${1:-$(GetAndCheckCluster)}          # Exits on error.
+  jsnodestate=$(LoadAndValidateClusterState)   # Exits on error.
+
+  local to_stop=($(Jq -r "$jsnodestate" '
+                    .n_main[] | select(.status != "TERMINATED").selfLink'))
+  [[ ! ${to_stop-} ]] &&
+    { Say "Cluster is already powered OFF"; return; }
+
+  Say "Stopping nodes: $(C c)${to_stop[@]##*/}$(C)"
+  # Listing of GCE operations reported with --async is uninformative.
+  local async=
+  [[ $OPT_wait ]] || async='--async --no-user-output-enabled'
+  $GCI stop $async "${to_stop[@]}"
+  [[ $OPT_wait ]] || Say "Asynchronous stop request submitted"
+}
+
+#==============================================================================#
+# The Show command
+#==============================================================================#
+
+CmdShow() {
+  local argspec="\
+$my0 [<common-options>] show [<options>] [<cluster>]
+
+Display current power state. Switches control the report detail level.
+Use your default cluster if <cluster> is omitted.
+--
+ The 'show' command options:
+t,terse              Print one-line state summary.
+silent*              (hidden) do not report error, return exit status only.
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  cluster=${1:-$(GetAndCheckCluster)}  # Exits on error.
+  jsnodestate=$(LoadAndValidateClusterState -p)
+  [[ $OPT_silent ]] && return 0
+
+  terse="Cluster '$(C c)$cluster$(C)' "
+  case $(Jq -r "$jsnodestate" '.n_main|map(.status)|unique|join(":")') in
+    TERMINATED) terse+="is powered $(C c OFF)" ;;
+    RUNNING) terse+="powered $(C g ON)" ;;
+    RUNNING:TERMINATED) terse+="has some nodes $(C g ON)" ;;
+    *) terse+="is changing power $(C c ON/OFF) state" ;;
+  esac
+  terse+="; is in $(C c)$(Jq -r "$jsnodestate" .pwr_level)$(C) power mode"
+  JqTest "$jsnodestate" '.n_compute|length > 0' &&
+    terse+="; has active compute nodes"
+  Say "$terse".
+  #[[ $OPT_terse ]] && return 0
+  return 0
+
+  # Non-terse output, with the status of nodes.
+  # NAME ROLE MACHINE POWER_LEVEL POWER_STATE
+
+}
+
+#==============================================================================#
+# The Select command
+#==============================================================================#
+
+CmdSelect() {
+  local argspec="\
+$my0 [<common-options>] select [<cluster>]
+
+Select a cluster to make default for operations of this and a few other tools
+
+If you do not specify the cluster on command line, the program will ask you
+interactively with a menu of available deployments.
+--
+internal-add*=CLUS     #(hidden) Called when CLUS just has been added.
+internal-rm*=CLUS      #(hidden) Called when CLUS just was removed.
+$argp_common_options"
+
+  ArgParse -g2 -a0 -A1 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  local all_bad all_good clus_var current desired jscandi
+  desired=${1-}  # Empty = ask me interactively, or am internal add/rm call.
+  current=$(GetAndCheckCluster -e0)  # -e0 = not much more than just get name.
+  Dbg1 "User's current cluster '$current', desired '$desired'"
+
+  # Get a transmogrified variable name for the user account.
+  : $(GetUserAccount)
+  clus_var=users/${_//@/-at-}/cluster
+
+  if [[ $current && $current == $OPT_internal_rm ]]; then
+    Warn "Your current cluster '$(C c)$current$(C)' has been just removed." \
+         "Removing your default cluster preference."
+     RuntimeConfigVarUnset burrmill $clus_var || true
+     current=
+  fi
+
+  # If the user has a preferred cluster, and we just added a new one, leave the
+  # user's preference alone. We can assume that by the time he deploys more than
+  # one cluster, he does not need as much babysitting as at the very start. The
+  # only actionable case is when the first cluster is added: then we make it the
+  # default automatically.
+  [[ $current && $OPT_internal_add ]] && exit 0
+
+  # Get all deployments. Good ones have a manifest and no operation errors. Note
+  # that operationType=delete and DONE cannot be set together: this would entail
+  # that the deployment has been removed successfully, and therefor there is no
+  # record to read; thus we can never in fact read such a combination.
+  jscandi=$(GetLikelyUsableDeployments)
+  Dbg2 $'Candidate deployments:\n'"$jscandi"
+
+  all_good=($(Jq -r "$jscandi" '.[] | select(.ok) | .name'))
+  all_bad=($(Jq -r "$jscandi" '.[] | select(.ok|not) | .name'))
+  Dbg1 "All possibly usable clusters: ${all_good[@]}"
+  Dbg1 "All broken clusters: ${all_bad[@]}"
+
+  if [[ ! ${all_good-}${all_bad-} ]]; then
+    if [[ $OPT_internal_rm ]]; then
+      Say "Project '$(C c)$project$(C)' has no more deployed clusters."
+    else
+      Warn "Project '$(C c)$project$(C)' has no deployed clusters yet." \
+           "Use '$(C c)bm-deploy new$(C)' to deploy one."
+    fi
+    exit 0
+  fi
+
+  # TODO: Maybe library for coloring straight in jq? Even if added to inline
+  #       programs as a string?
+  Say "Brief summary of deployments in project '$(C c)$project$(C)'"
+  Jq -r --arg c "$current" "$jscandi" '
+     .[] | ( [ if .name==$c then "\\m[cyan]>>>\\m[]" else "" end,
+               .name, .zone,
+               if .ok then "\\m[green]YES\\m[]"
+                      else "\\m[red]BROKEN\\m[]" end ] )
+         | join("\t") | @text' |
+    format-table "-H|SEL<CLUSTER ID<ZONE<USABLE"
+
+  [[ ${all_bad-} ]] &&
+    Warn "There are broken deployments. You may be paying for${LF}resources" \
+         "that you do not use. Try '$(C c)bm-deploy$(C)" \
+         "[ $(C y clean) | $(C y fix) | $(C y remove) ]' (read help for more)."
+
+  [[ ${all_good-} ]] ||
+    Die "Project '$(C c)$project$(C)' has no usable deployed clusters."
+
+  if [[ $desired ]]; then
+    IsIn "$desired" ${all_bad[@]} &&
+      Die "The deployment '$(C c)$desired$(C)' is in a broken state." \
+          "Use '$(C c)bm-deploy fix$(C)' to fix it first."
+    IsIn "$desired" ${all_good[@]} ||
+      Die "The cluster deployment '$(C c)$desired$(C)' does not exist."
+  fi
+
+  # What we know by now: either $desired is empty, or is in $all_good, and that
+  # $all_good has at least one candidate.
+  [[ $current ]] &&
+    Say "Your currenly selected cluster is '$(C c)$current$(C)'"
+
+  (( ${#all_good[@]} == 1 )) && [[ $current = $all_good ]] && {
+    Say "There are no other usable clusters except your selected one, exiting."
+    exit 0; }
+
+  (( ${#all_good[@]} == 1 )) && [[ ! $current ]] && {
+    desired=$all_good
+    Say "Selecting the only existing cluster '$(C c)$desired$(C)'" \
+        "as the default."; }
+
+  # Interactive?
+  if [[ ! $desired ]]; then
+    SayBold "The following clusters are available:"
+    desired=$(SimpleMenu ${all_good[@]}) || true
+    [[ ! $desired || $desired == $current ]] &&
+      { SayBold "Exiting with no changes."; exit 0; }
+  fi
+
+  # _LAVCS exits if something is wrong. Skip power check though, since we just
+  # issued the off command, which will cause an incorrect power state reading.
+  Say "Checking the state of the cluster '$(C c)$desired$(C)'"
+  jsnodestate=$(LoadAndValidateClusterState -p "$desired")
+
+  Say "Setting '$(C c)$desired$(C)' as your default cluster."
+  RuntimeConfigVarSet burrmill $clus_var $desired
+}
+
+#==============================================================================#
+# The tool entrypoint.
+#==============================================================================#
+
+argspec_top="\
+$my0 [<common-options>] <command> [<command-options>] [<command-args>...]
+$my0 <command> --help  # Get help on individual commands.
+
+Control cluster state: turn cluster on or off, switch low/high power states,
+validate component health, and select user's default cluster.
+
+The low-power state is used for analyzing results of an experiment, preparing an
+experiment, or performing maintenance tasks, such as archiving for long-term
+storage. In this state, controller is offline, and filer and login nodes use
+lower CPU and memory to reduce costs.
+
+The full-power state is for running the experiment. Machines are upgraded to
+their full-power settings, and the controller is powered up.
+
+<command> is one of:
+  on     - Turn cluster on in its currently set power state.
+  off    - Turn cluster off.
+  low    - Change configuration to lower-power/cost, and turn nodes on.
+  high   - Change configuration to full-power/higher cost, and turn nodes on.
+  show   - Display extended information. Use -x for extended report.
+  select - Select your default cluster (use 'bm-deploy list' for a list).
+
+The common options are accepted either before or after the command.
+All long options and command names can be shortened to an unambiguous prefix.
+--
+$argp_common_options"
+
+# Do not advertise the kill command.
+# kill   - Turn off cluster by pulling power cords. Do that only in an emergency
+
+ArgParse -uc'help high kill low on off show select' \
+         -d'show -t' "$argspec_top"
+
+verb=${POPT_ARGV-}
+unset POPT_ARGV[0]
+
+case $verb in
+  high)     CmdHigh    ;;
+  'kill')   CmdKill    ;;
+  low)      CmdLow     ;;
+  off)      CmdOff     ;;
+  on)       CmdOn      ;;
+  'select') CmdSelect  ;;
+  show)     CmdShow    ;;
+  *) Die "$my0:$LINENO:internal error:command verb '$verb' case missing"
+esac

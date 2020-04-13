@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# Use this file as an example of adding software to the common software
+# disk. You should obtain a SRILM source tarball, and put it into the /sources/
+# directory of your software bucket. We'll show how to run multiple build stages
+# on a package; you do not need, technically, to separate compiling, testing and
+# packaging: all these steps can be done in one Cloud Build step, and this is in
+# fact how we package, for example, Slurm. You can take either approach.
+#
+# The cloudbuild.yaml file format is defined and interpreted by the Cloud Build
+# (GCB); we have only some conventions on top of that.
+#
+# You can build this file with the command 'bm-cloudbuild srilm'. The command
+# looks for the named subdirectory with the etc/build and lib/build. The etc/
+# directory is all yours, and you should check it in your source control
+# repository. This way you can upgrade by merging our version without any
+# possible merge conflicts.
+
+substitutions:
+  # The package to fetch and build. We'll include explicit version, so that you
+  # can build different versions just by changing the MillFile in the etc/build
+  # directory. The substitutions are performed by the build server, and do not
+  # allow any advanced shell syntax; only simple style like '$VAR' or '${VAR}'
+  # can be used. The very last step shows what to do if you need some help from
+  # bash to substitute more complex stuff or run multiple commands.
+  #
+  # You can leave _SRILM_VER undefined, and rely on the Millfile supplying
+  # one. If debugging the build only, 'bm-cloudbuild srilm _SRILM_VER=1.2.3'
+  # will set the variable (even it has the default set in this file.
+  #
+  # Also note that all user-defined variable names must begin with the '_'; GCB
+  # reserves all other names.
+  _SRILM_VER:    '1.7.3'  # Numeric strings often need to be quoted in YAML.
+                          # Not in this case, strictly, but whenever the string
+                          # parses as a float (e.g., '1.7'), it MUST be quoted.
+
+# The boilerplate part is same for all our cloudbuild.yaml files. Just keep it
+# this way. Your substitution variables go immediately before it, and
+# environment variables, if you want to propagate any to every build step, go
+# immediately after. Be careful: no '-' in the former part, but the '-' aligned
+# with the word 'env:' in the latter!
+
+#++ Boilerplate
+  _GS_LOCATION: $_GS_LOCATION
+  _GS_SCRATCH:  $_GS_SCRATCH
+  _GS_SOFTWARE: $_GS_SOFTWARE
+
+logsBucket: $_GS_SCRATCH/cloudbuild/logs
+options:
+  logging: GCS_ONLY
+  env:
+  - _GS_LOCATION=$_GS_LOCATION
+  - _GS_SCRATCH=$_GS_SCRATCH
+  - _GS_SOFTWARE=$_GS_SOFTWARE
+#-- Boilerplate
+
+# Assign a build tag. You can filter 15 latest build of a tag using the
+# 'bm-cloudbuild -l srilm' command. This is the only place and purpose of it;
+# it's distinct from both Docker tags and artifact metadata, and appears only in
+# the list of builds. It's technically optional, but in fact so useful that you
+# should always assign one, distinct for every cloudbuild.yaml file.
+tags: [srilm]
+
+# The build with the full battery of tests takes about 11 minutes. The way the
+# SRILM Makefile is written is not helped by requesting a higher-CPU-count
+# instance, so just extend the timeout; the default 600s = 10 min is too short.
+timeout: 800s
+
+# In this build, all steps run sequentially.
+steps:
+  # Note that unambiguous string constants can be written in YAML without the
+  # need of quoting, like the 'args:' array below. This step pulls the source
+  # tarball into the working directory. Note that the arguments are passed
+  # directly to the tool without being parsed by the shell, and 'args:' defines
+  # the argv array as seen by the build step, so mind the commas. Quotes are
+  # optional in YAML, as long as arguments do not contain commas, colons, square
+  # brackets or other ambiguous punctuation, but are always acceptable.
+- name: gcr.io/cloud-builders/gsutil
+  args: [cp, "$_GS_SOFTWARE/sources/srilm-${_SRILM_VER}.tar.gz", .]
+
+  # There is a 'tar' GCB step, but we cannot just run it because srilm is
+  # packaged with the tar root same as the source root (unlike many other
+  # packages, which unpack the tar into a subdirectory by default). So we'll
+  # unpack it inside our build script, build_srilm.sh. Note that all files from
+  # your local etc/build/srilm directory are automatically transferred to the
+  # working directory, so the local scripts are already there. Our cxx builder
+  # must have all dependencies installed beforehand, which you may put into the
+  # file etc/build/user-cxx.inc.sh and rebuild the cxx builder; refer to
+  # lib/build/local-cxx/README file for reference.
+- name: $_GS_LOCATION.gcr.io/$PROJECT_ID/cxx
+  args: [ ./build_srilm.sh ]
+
+  # Drop the build artifact into the /tarballs/ directory of the GS_SOFTWARE
+  # bucket. We cannot use the GCB machinery at this time, because we supply a
+  # required critical piece of metadata that the process of software disk
+  # assembly will be looking for:
+  #
+  #   -hx-goog-meta-version:1.7.3
+  #
+  # Here, just for the sake of an example, we use an alternative array syntax of
+  # YAML containing four elements, which are separate arguments to the 'gsutil'
+  # command, on its own line. Note that the starting '-' must align *strictly*
+  # with the 'args:' line, but spaces after the '-' may be added freely to
+  # improve readability of the file.
+  #
+  # When writing a cloudbuild.yaml file, it's a good idea to run it by the y2j
+  # utility from the BurrMill bin/ directory to verify that it parses:
+  # 'y2j cloudbuild.yaml >/dev/null' must print no errors.
+- name: gcr.io/cloud-builders/gsutil
+  args:
+  - -hx-goog-meta-version:${_SRILM_VER}
+  - cp
+  -   srilm.tar.gz
+  -   $_GS_SOFTWARE/tarballs/

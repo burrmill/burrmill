@@ -1,0 +1,12 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+[Users and cluster IDs can reboot and poweroff]
+Identity=unix-group:burrmill;unix-group:interactive;unix-group:adm
+Action=org.freedesktop.login1.reboot*;org.freedesktop.login1.power-off*;org.freedesktop.login1.halt*;org.freedesktop.login1.set-wall-message
+ResultAny=yes
+ResultActive=yes
+ResultInactive=yes

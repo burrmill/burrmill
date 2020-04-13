@@ -1,0 +1,23 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+#
+# This is a passive target in systemd parlance: providers pull
+# it, and arrange themselves Before= it, and consumers set After=
+# but never pull it.
+
+[Unit]
+Description=BurrMill Environment and Preparation Tasks Complete
+Documentation=http://100d.space/cat/burrmill
+RefuseManualStart=yes
+RefuseManualStop=yes
+
+# This target essentially subsumes the nss-lookup state without
+# messing much with ordering. This allows all BurrBill services
+# to passively arrange themselves after a single target. Every
+# one of them needs its own host name known and DNS resolution
+# working, so this is a good convenience without any boot time
+# compromise.
+After=nss-lookup.target

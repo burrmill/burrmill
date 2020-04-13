@@ -1,0 +1,5 @@
+__pycache__/
+_temp/
+.temp/
+*.elc
+*.pyc

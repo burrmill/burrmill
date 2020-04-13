@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# Do not lecture anyone here, please.
+Defaults lecture = never
+
+# Keep $HOME unchanged (a compile-time default for most but not all distros).
+Defaults env_keep += HOME, !set_home
+
+# We regret we do not have resources to respond to every mail message we
+# receive. In fact, we do not even read any, ever.
+Defaults !mail_badpass, !mail_no_user, mailerpath = /bin/true
+
+# Just 'sudo' for root prompt.
+Defaults shell_noargs
+
+# And no session logging, too.
+Defaults !logfile, !syslog
+
+# Let sudoers sudo
+%sudo   ALL=(ALL:ALL) NOPASSWD: ALL

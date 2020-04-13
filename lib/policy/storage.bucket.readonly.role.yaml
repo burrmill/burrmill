@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+stage: GA
+title: Storage Bucket Objects Read-Only Access
+description: Provides read-only access to the contents of a bucket.
+includedPermissions:
+- storage.buckets.get
+- storage.objects.get
+- storage.objects.list

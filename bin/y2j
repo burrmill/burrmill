@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# -*- python-indent-offset: 2; -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+import argparse as ap, json, os.path, sys
+
+ME = os.path.basename(sys.argv[0])
+
+try:
+  import yaml
+except ImportError:
+  exit(f"{ME}:fatal:PyYAML is missing. Do 'apt install python3-yaml' "
+        "or 'pip3 install PyYAML=3.13'")
+
+
+# Scope the argparser under carpet, we need it once.
+def _parse_args() -> ap.Namespace:
+  p = ap.ArgumentParser(description='Convert YAML to JSON.',
+                        epilog='Conversion loses YAML comments irreversibly.')
+  a = p.add_argument
+  a('infile', metavar=' FILE | - ', nargs='?',
+    help="Input filename. Omit or pass '-' for stdin.")
+  a('--indent', '-d', metavar='N', type=int, default=2,
+    help='indent output this many spaces. Default indent is 2.')
+  a('--compact', '-c', dest='separators', action='store_const', const=(',',':'),
+    help='output as compactly as possible. -d has no effect.')
+  a('--sort-keys', '-s', action='store_true',
+    help='sort dictionary keys. The default is to preserve order.')
+
+  o = p.parse_args()
+  if o.infile == '-': o.infile = None
+  if o.separators: o.indent = None
+  return o
+
+
+def _main() -> int:
+  nsargs = _parse_args()
+  kwargs = vars(nsargs)
+  infile = kwargs.pop('infile')
+  try:
+    with (infile and open(infile) or sys.stdin) as ifd:
+      data = yaml.safe_load(ifd)
+      if data:
+        json.dump(data, sys.stdout, **kwargs)
+        if nsargs.indent: print()
+  # Except that the BrokenPipeError is broken in 3.7. Ceci n’est pas une pipe.
+  except BrokenPipeError: pass
+  return 0
+
+
+if __name__ == '__main__':
+  # Don't puke stack trace on Ctrl+C.
+  import signal as sig
+  sig.signal(sig.SIGINT, sig.SIG_DFL)
+
+  try:
+    exit(_main())
+  except Exception as e:
+    # Save the innocent uninitiated from the Zen of backtrace.
+    exit(f"{ME}:fatal: {type(e).__name__}: {e}")

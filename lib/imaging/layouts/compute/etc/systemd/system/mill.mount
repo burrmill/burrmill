@@ -1,0 +1,34 @@
+# -*- mode: conf -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+#
+# This file was installed by BurrMill.
+
+[Unit]
+Description=BurrMill filer NFS mount for /mill
+After=burrmill-environment.target
+
+[Mount]
+Where=/mill
+What=${BURRMILL_FILER}:/mill/burrmill
+Type=nfs
+Options=proto=tcp,hard,noacl,rsize=1048576,wsize=1048576,ac,acregmin=2,acregmax=10,acdirmin=1,acdirmax=1
+DirectoryMode=777
+
+# If you run into timeout, you are overloading filer.
+#
+# - Increase the number of vCPUs on it. Egress cap is proportional to the number
+#   of vCPUs from 4 to 16 (2GBps per vCPU, up to max 32GBps).
+#
+# - GCE will issue a recommendation to downsize it, because it sees a lot of
+#   idle CPUs. Do not follow it, you are buying bandwith, not computing power!
+#
+# - Maybe the shared disk is too small. You are losing money on the expensive
+#   GPU time, and an extra 1TB of pd-standard storage is cheap.
+#
+# Sizing the filer is covered in the BurrMill 101 crash course, part 5, the last
+# one: https://100d.space/burrmill-101
+#
+# But DO NOT increase this timeout! 30s is insanely large already. If it times
+# out, your configuration is seriously wrong.
+TimeoutSec=30

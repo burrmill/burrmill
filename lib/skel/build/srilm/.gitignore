@@ -1,0 +1,4 @@
+GS_METADATA
+*.tar.gz
+/opt/
+/srilm/

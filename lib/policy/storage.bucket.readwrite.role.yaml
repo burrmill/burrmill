@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+stage: GA
+title: Storage Bucket Objects Read-Write Access
+description: Provides read-write access to the contents of a bucket.
+includedPermissions:
+- storage.buckets.get
+- storage.objects.create
+- storage.objects.delete
+- storage.objects.get
+- storage.objects.list
+- storage.objects.update

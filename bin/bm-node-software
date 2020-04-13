@@ -1,0 +1,584 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+# This is a tool for managing the CNS disk: building a new image snapshot from
+# changed sources, creating and rolling out the disk from snapshot, and
+# gathering and pruning the inventory of snapshots and disks.
+#
+# I'm using a bit of groff tbl syntax directly to place the manifest in a table
+# cell as a column, sorry, and double that for producing it with a jq program.
+# If you want to extend libexec/format-table to support columnar cells more
+# naturally, without resorting to groff directives, please by all means do.
+
+source "$(realpath -m "${BASH_SOURCE}/../preamble.inc.sh")"
+source common.inc.sh
+source cluster.inc.sh
+source daisy.inc.sh
+source parseopt.inc.sh
+
+shopt -s extglob
+set -euo pipefail
+
+RequireInteractive
+
+# gcloud filter selecting CNS disks and images.
+readonly base_filter='labels.burrmill:* AND labels.disklabel=burrmill_cns'
+
+# Options common to all programs.
+argp_common_options="
+ Common options:
+d,debug?N                 print verbose messages; the larger the N, the merrier.
+n,dry-run                 show what would be done but don't do it.
+y,yes!                    skip confirmation on most question.
+"
+
+_GetSnapshotList() {
+  local filter=$base_filter
+  [[ ${1-} = -f ]] && { filter+=" AND labels.${2/,/\ AND\ labels.}"; shift 2; }
+  $GC snapshots list "$@" --filter="$filter" --sort-by=~creationTimestamp  \
+      --format='json(name,labels,storageLocations.list(),storageBytes.size(),
+                     diskSizeGb.format("{} GB"),
+                     creationTimestamp.date(format="%y-%m-%d %H:%M",tz=))'
+}
+
+# With -a, get list from all zones, otherwise for current zone.
+_GetDiskList() {
+  local filter=$base_filter
+  [[ ${1-} = -a ]] && shift || filter+=" AND zone:*/$zone"
+  $GC disks list "$@" --filter="$filter" --sort-by=zone,~creationTimestamp  \
+      --format='json(name,labels,zone.name(), users.map().name(),
+                     sizeGb.format("{} GB"),
+                     creationTimestamp.date(format="%y-%m-%d %H:%M",tz=))'
+}
+
+# Augment JSON from _ListSnapshot with the key 'manifest' with the value
+# formatted specially for format-table. Any JSON array of objects can be
+# processed as long as it has a '"labels": { ... }' dict.
+#
+# This accepts JSON, formats it using jq for a perl script which then passes it
+# to groff to invoke tbl to print the table. If this is not a mess, what is.
+#
+# The manifest is assembled from labels with the prefix "bmv_", which is
+# stripped for display, and their values are decoded ('__' to '_', lone '_' to
+# '.', and '--' to '+'), then formatted as a tbl "text block", like below. The
+# tabstop .ta +6 numeric value comes from the longest label length + 1; see the
+# .s property added to the key-value pairs, and representing the key length, in
+# the jq script. Whitespace on both sides of the ':' is a single TAB character.
+#
+# burrmill-cns-v006-190816 <TAB> 50 GB <TAB> T{
+# |.ta +6 +2
+# |cuda   :       10.1.2
+# |.br
+# |kaldi  :       6f329a62e
+# |.br
+# |mkl    :       2019.2
+# |.br
+# |slurm  :       19.01.4-0
+# |T}
+#
+# stdin is the JSON array of snapshots or disks from _Get{Snapshot,Disk}List.
+# stdout is original array with .manifest preformatted for gtbl
+_FormatManifest() {
+  # For, ehm, readability the rule is: if a pair of any paired braces ([], {},
+  # ()) opens and closes on the same line, then the opening brace has no space
+  # after it, and the closing before; if on different lines, then there is a
+  # space both after the opening and before the closing brace of the pair.
+  $JQ -r 'map(
+ . +
+  { manifest:
+    ( .labels
+      | to_entries
+      | map( select(.key | startswith("bmv_"))
+             | .key |= ltrimstr("bmv_")
+             | .value |= ( sub("__"; "?"; "g")
+                         | sub("_";  "."; "g")
+                         | sub("[?]";  "_"; "g")
+                         | sub("--"; "+"; "g") )
+             | .s = (.key|length) )
+      | [ ([max_by(.s).s//empty] | "T{\n|.ta +\(.[] + 1) +2\n"),
+          (.[] |= "|\(.key)\t:\t\(.value)" | join("\n|.br\n")),
+          (.[0]//empty | "\n|T}") ]
+      | add ) } )'
+}
+
+# stdin is the JSON array of snapshots or disks from _Get{Snapshot,Disk}List.
+# stdout is original array with the .users field formatted as a gtbl column.
+_FormatDiskLong() {
+  # try/catch does not work with the update '|=' operator. A bug?
+  $JQ 'map(.users = (
+    .users | try (["T{\n|", join("\n|.br\n|"), "\n|T}"] | join(""))
+             catch "\\m[red]*NONE*\\m[]" ) )' |
+    _FormatManifest
+}
+
+_FormatDiskBrief() {
+  $JQ 'map(.users |= (if . then "\(length) nodes"
+                          else "\\m[red]NONE\\m[]" end))'
+}
+
+# Very much like 'jq -r .[] | @tsv', except tabs and newlines are retained in
+# the fields. stdin is a JSON array; stdout is text for piping to format-table.
+# $1 is a jq filter of fields in table, e.g., '.name,.diskSizeGb,.manifest'.
+_JqTsvText() {
+  $JQ -r '.[] | ['"${1?}"'] | map(tostring) | join("\t") | @text'
+}
+
+# -b for the brief form (w/o manifests). $1 is the JSON list of snapshots.
+_PrintSnapshotList() {
+  local long=--allbox fields heads
+  [[ ${1?} = -b ]] && { long=; shift; }
+
+  fields='.name,.creationTimestamp,.storageLocations,.diskSizeGb,.storageBytes'
+  heads='<NAME<CREATED<LOC>DISK SZ.SNAP SZ'
+  [[ $long ]] && { fields+=',.manifest'; heads+='<MANIFEST'; }
+
+  echo "${1?}" | _FormatManifest |
+    _JqTsvText "$fields" | format-table $long "-H$heads"
+}
+
+# -b is for a brief form, without manifes and with use count instead of list. $1
+# -is the JSON list of snapshots.
+_PrintDiskList() {
+  local long=--allbox fields heads
+  [[ ${1?} = -b ]] && { long=; shift; }
+
+  fields='.name,.zone,.sizeGb,.creationTimestamp,.users'
+  heads='<NAME<ZONE<SIZE<CREATED<USED BY'
+  [[ $long ]] && { fields+=',.manifest'; heads+='<MANIFEST'; }
+
+  echo "${1?}" |
+    if [[ $long ]]; then _FormatDiskLong; else _FormatDiskBrief; fi |
+    _JqTsvText "$fields" | format-table $long "-H$heads"
+}
+
+
+# Read the artifact manifest and write it with labels encoded to GCE's fancy:
+# the '_' is doubled, the '.' is replaced with a '_', and the '+' wtih '--'.
+# Versions are the second field. A reverse transform is done in _FormatManifest.
+# See https://issuetracker.google.com/issues/146690918.
+_EncodeManifestVersions() {
+  perl -lne '@x=split;
+             for ($x[1]) { s:\.:?:g; s:_:__:g; s:\?:_:g; s:\+:--:g; }
+             print join " ", @x'
+}
+
+#==============================================================================#
+# The list command implementation
+#==============================================================================#
+
+CmdList() {
+  local argspec="\
+$my0 [<common-options>] list [<list-options>]
+
+List CNS disk images and live disks, including software manifests
+
+--
+ List command options:
+b,brief       Do not show manifests and the full list of disk users.
+s,snapshots   Show CNS snapshots only. Default is list snapshots and disks.
+
+$argp_common_options"
+  local jsval where
+
+  ArgParse -g2 -A0 -a0 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  # Internal option -b to _Print{Snapshot,Disk}List
+  [[ $OPT_brief ]] && OPT_brief=-b
+
+  local jsval where
+
+  jsval=$(_GetSnapshotList)
+  Dbg2 $'Raw snapshots JSON:\n'"$jsval"
+  case $jsval in
+    ''|'[]') Say "No CNS snapshots found in project '$(C c)$project$(C)'" ;;
+    *) Say "CNS snapshots in project '$(C c)$project$(C)':"
+       _PrintSnapshotList $OPT_brief "$jsval" ;;
+  esac
+
+  if [[ ! $OPT_snapshots ]]; then
+    jsval=$(_GetDiskList -a)
+    Dbg2 $'Raw CNS disks JSON:\n'"$jsval"
+    case $jsval in
+      ''|'[]') Say "No CNS disks found in project '$(C c)$project$(C)'" ;;
+      *) Say "CNS disks in project '$(C c)$project$(C)':"
+         _PrintDiskList $OPT_brief "$jsval" ;;
+    esac
+  fi
+}
+
+#==============================================================================#
+# The rollout command implementation
+#==============================================================================#
+
+CmdRollout() {
+  local argspec="\
+$my0 [<common-options>] rollout [<rollout-options>] [snapshot]
+
+Instantiate a disk from snapshot and rollout disk to cluster.
+
+The CNS disk snapshot is stored in a multiregion (continent-wide, essentially).
+The live disk, however, is always zonal. The disk normally has the same short
+name as the snapshot. In GCE, disks are fully identified by their name and zone,
+so the short name can be same in different zones.
+
+The <snapshot> argument can specify either the full name or version number only,
+e.g. either 'burrmill-cns-v012-200109' or 'v012'. If omitted, the newest
+snapshot is used.
+
+If --cluster is not specified, your default cluster is the target.
+
+Note that the filesystem won't be grown, and there is no need to. In GCE, disk
+performance increases with its size (to a certain limit; read the docs). Going
+below 20GB will hamper throughput; practical sizes are between 35GB and 100GB.
+Remember that smaller and cheaper disk may translate to more GPU usage time.
+
+For removing unneeded older disks, use the 'prune' subcommand. To remove a CNS
+disk by explicit name, use 'rmdisk' subcommand.
+--
+ Rollout command options:
+C,cluster=C  Cluster name to attach disk to.
+
+$argp_common_options"
+
+
+  ArgParse -g2 "$argspec"
+  set -- "${POPT_ARGV[@]}"
+
+  # Figure out the full snapshot name.
+  local err go cluster
+  local snap=${1-} fullnamep= filter=
+  case $snap in
+    (v[0-9][0-9][0-9]) filter='name~.*-'$snap'-\d+$ AND' ;;
+    (?*) filter="name=$snap AND" fullnamep=y
+  esac
+  jsnap=$($GC snapshots list --limit=1 --filter="$filter $base_filter" \
+                     --sort-by=~creationTimestamp --format='json(name,labels)')
+  snap=$(jq -r <<<"$jsnap" '.[]|.name')
+  [[ $snap || ${1-} ]] ||
+    Die "Project $(C c)$project$(C) has no CNS snapshots."\
+        "Run '$(C c)$my0 build$(C)' to build one."
+  [[ $snap ]] ||
+    Die "Cannot find a CNS snapshot matching '${1-}'. Run '$my0 list --snap'."
+  [[ $fullnamep ]] ||  # Do not repeat full name.
+    Say "Using CNS snapshot $(C c $snap) as source."
+
+  # Check common prerequisites. We do not need the CNS disk here, keep existing.
+  snap=$(VerifyPrereqsAndGetCnsDisk "$snap")
+
+  cluster=$(GetAndCheckCluster "$OPT_cluster" -e0)  # Only ID, LAVCS runs checks
+  Say "Checking health of cluster '$(C c)$cluster'"
+  # Just call the verifier, and ignore output JSON, we have no use for it.
+  err=0; LoadAndValidateClusterState "$cluster" >/dev/null || err=$?
+  go=
+  case $err in
+    0) Say "The cluster is healthy, ok to proceed.";
+       go=1  ;;
+    1|2) Error "Unspecific error, likely uncorrectable (e.g, " \
+               "a non-exiting cluster)." ;;
+    # 6 = No CNS record, apparently interrupted.
+    6) Say "Despite the above error, we'll likely recover from this state"
+       go=2 ;;
+    *) Error "This tool is unlikely to recover from the error reported," \
+             "use 'bm-deploy fix <cluster name>' for the more thorough fix"
+  esac
+  [[ $go ]] || exit 1
+
+  SayBold "Please do not interrupt the operation.$(C)${LF}If it does get" \
+          "interrupted, try running the command again, then, if unsuccessful,"\
+          "use '$(C c)bm-deploy fix $(C y)<cluster name>$(C)'."
+
+  # Step 1 is update the manifest with 'with_boot_disk=false'. This will force
+  # DM to detach and delete boot disks (see the template in lib/deploy). In
+  # case of error 8 (Manifest is missing the boot disk), it is likely ok to
+  # skip this step, as it will be a noop anyway.
+
+  # TODO(kkm): If one CNS disk attached to two clusters in the same zone,
+  # the first phase fails. Its JSON description shows the failed resource;
+  # verify that it was indeed the old CNS disk that was not deletable, and
+  # rerun phase 1 with delete=abandon, since the last owner will delete it
+  # successfully later.
+  (( go <= 1 )) && {
+    SayBold "Removing old CNS disks from cluster $(C c)$cluster"
+    GdmUpdateDeployment 1 $cluster cns_disk: ; }  &&
+  (( go <= 2 )) && {
+    SayBold "Creating and attaching new CNS disks to cluster $(C c)$cluster"
+    GdmUpdateDeployment 2 $cluster cns_disk:$snap ; } &&
+  true
+
+  Say "Rollout of CNS disk '$(C c)$snap$(C)' to cluster '$(C c)$cluster$(C)'" \
+      "completed successfully."
+}
+
+#==============================================================================#
+# The prune command.
+#==============================================================================#
+
+CmdPrune() {
+  Die "TODO(kkm): Implement prune command"
+}
+
+#==============================================================================#
+# The rmdisk command.
+#==============================================================================#
+
+CmdRmDisk() {
+  Die "TODO(kkm): Implement rmdisk command"
+}
+
+#==============================================================================#
+# The rmsnap command.
+#==============================================================================#
+
+CmdRmSnapshot() {
+  Die "TODO(kkm): Implement rmsnap command"
+}
+
+#==============================================================================#
+# The build command. Long.
+#==============================================================================#
+
+# Run the build sequence of the confusingly similarly named 'build' command. Die
+# on a failure, or return success, so the assembly stage can be run.
+_Build() {
+  local bid bname buildseq status failed=
+  local -a cmd; local -A waiting=()
+
+  GetProjectGsConfig
+
+  buildseq=$(miller.py --project=$project \
+                       ${OPT_debug:+--debug=$OPT_debug} \
+                       ${OPT_rebuild_all:+'--force=*'} )
+  [[ $buildseq ]] ||
+    return 0  # miller.py prints the up-to-date diagnostics, just exit.
+
+  # The build sequence output by miller.py (w/o --gather) looks like
+  #   build mkl 2019.5 _MKL_VER=2019.5 ...
+  #   build cxx -
+  #   wait
+  #   ...
+  # The 'build' command has the name and version in the two tokens right after
+  # the command. The rest of line consists of variable assignments. To transform
+  # it to a bm-build command line, we remove tokens 0 and 2 (0-based). The
+  # 'wait' is a command to wait for the current batch of builds, because next
+  # builds would depend on it. There is also a 'wait' following the very last
+  # batch. 'bm-build -M' outputs only the build id to stdout, which we then
+  # can poll for completion and status.
+  #
+  # The $waiting assoc maps pending build ids to user-readable names of what is
+  # being built, for diagnostics.
+  #
+  # The Build API is messy. This is a definition of possible build status codes:
+  # https://cloud.google.com/cloud-build/docs/api/reference/rest/Shared.Types/Status
+  # Now try to tell what should I infer from STATUS_UNKNOWN. Retry request?
+  # Consider it failed? And there is no documented way, AFAIK, to tell if the
+  # build has completed or not. I am using quite a reasonable observation that
+  # the 'finishTime' field is not set in ongoing builds. But it's undocumented.
+  while read -ra cmd; do
+    case $cmd in
+      'build')
+        bname="${cmd[1]}"
+        [[ ${cmd[2]} = - ]] || bname+=" version ${cmd[2]}"
+        unset cmd[0] cmd[2]
+        Say "Starting build of $(C c) $bname"
+        bid=$(bm-build -M ${OPT_dry_run:+'-n'} "${cmd[@]}")
+        [[ $OPT_dry_run ]] || waiting[$bid]=$bname
+        ;;
+      'wait')
+        Say "Waiting for ongoing builds to complete." \
+            "Some take longer than 15 minutes, be patient."
+        while (( ${#waiting[@]} > 0 )); do
+          sleep 10
+          for bid in ${!waiting[@]}; do
+            status=$($GCLOUD builds describe $bid \
+                             --format='value(finishTime.yesno(y,n), status)')
+            if [[ $status = y* ]]; then
+              # Completed. The value is like 'y<TAB>SUCCESS', strip 2 chars.
+              status=${status:2}
+              bname=${waiting[$bid]}
+              unset waiting[$bid]
+              if [[ $status = SUCCESS ]]; then
+                Say "Build of $(C c "$bname") completed successfully."
+              else
+                failed=y
+                Warn "Build of $(C c "$bname") failed with status" \
+                     "$(C r "$status"). Use the command " \
+                     "'gcloud builds log $bid' to read the log, or use Web" \
+                     "links printed above by the gcloud command."
+              fi
+            fi
+          done
+        done
+        ;;
+      *)
+        Die "INTERNAL ERROR: Cannot parse output of miller.py for build"
+    esac
+    [[ $failed ]] && Die "One of the builds has failed"
+  done <<<"$buildseq"
+  return 0  # Sussessful if we've reached this point, but while read returns 1.
+}
+
+# Assemble a CNS disk according to the manifest generated by miller.py. This is
+# the second phase of the build command.
+_Assembly() {
+  local count diskname jlist jmatch manifest query vars
+  # 'miller.py --gather' outputs the manifest for assembling the disk, 4 tokens
+  # in each line, for example (lines indented for clarity only):
+  #
+  #   cuda 10.1.2 image us.gcr.io/myproject/cuda:10.1.2
+  #   srilm 1.7.3 gs    gs://somebucket/tarballs/srilm.tar.gz#1578015192714080
+  #
+  # The first and second tokens name the package and version, and are used only
+  # to label the snapshot. Tokens 3 and 4 define artifact type (image or gs
+  # object) and the location. The opt/ directory from the tarball is extracted
+  # to the CNS disk root, and same is done for the opt/ directory from the
+  # Docker image (strictly, a container made from the image, as files from the
+  # image cannot be extracted directly).
+  #
+  # All this work is done by the lib/imaging/cns_disk.sh script in a temporary
+  # VM, by using a Daisy workflow.
+  Say "Gathering build artifacts"
+
+  jlist=$(_GetSnapshotList)
+  Dbg1 "Found $(jq <<<"$jlist" -r length) snapshots"
+
+  manifest=$(miller.py --gather ${OPT_debug:+--debug=$OPT_debug} |
+               LC_ALL=C sort)
+  Dbg1 $'Raw miller manifest:\n--------\n'"$manifest"$'\n--------'
+
+  # Ok, I got the format-table hammer, so I'll just nail it.
+  Say "Assembling the CNS disk from the following artifacts:"
+  perl <<<"$manifest" -ne 'print join "\t", split, "\n"' |
+    format-table -H '<NAME<VERSION<TYPE<ARTIFACT LOCATION'
+
+  # See if there is a snapshot with all matching labels. We need to get the
+  # first two fields to the form '.bmv_<$1>=="<encoded $2>"', then combine them
+  # with the 'and' in between, to get a jq query.
+  query=$(_EncodeManifestVersions <<<"$manifest" | perl -e '
+            print join " and ", map { ($k,$v)=split; ".bmv_$k==\"$v\"" } <> ')
+  jmatch=$(jq -c <<<"$jlist" "map(select(.labels|select($query)))")
+  if [[ $jmatch && $jmatch != '[]' ]]; then
+    Warn "Snapshot(s) with a matching software manifest already exist:"
+    _PrintSnapshotList "$jmatch"
+    [[ $OPT_force ]] ||
+      Die "Will not assemble a duplicate copy. Use '-f' to force assembly"
+    Say "Assembling a snapshot anyway because of the --force option"
+  fi
+
+  # Try to figure out suffix from the newest image. We stick to the format
+  # 'burrmill-cns-v002-191204', but it's possible there are no images
+  # yet, or the name does not parse; start at v001 then.
+  diskname=$(jq <<<"$jlist" -r '.[0].name?' |
+               perl -ne 'use POSIX (strftime);
+                         $n = /-v(\d\d\d)-/ ? $1+1 : 1;
+                         $d = strftime "%y%m%d", localtime;
+                         printf "burrmill-cns-v%03d-$d\n", $n')
+
+  # Since we have all perl scripts at hand, send manifest to the build encoded.
+  # Why does GCE allow any script letter (Hiragana, Tamil, Armenian, Cyrillic,
+  # you name it), bit does not allow the good old '.' and '+'? Grrr. My FR
+  # https://issuetracker.google.com/issues/146690918 will be implemented soon
+  # after never, methinks.
+  manifest=$(_EncodeManifestVersions <<<"$manifest" | gzip -c -9 | base64 -w0)
+
+  Say "Building new CNS disk $(C c)$diskname$(C)"
+
+  vars="diskname=$diskname,manifest=$manifest,size=$OPT_size"
+  RunDaisy "-v$vars" cns_disk ||
+    Die "Daisy build failed.
+Look at the output above, and find a message 'Daisy scratch path' with a \
+direct link to the log folder. If not found, look for files in this location:
+
+https://console.cloud.google.com/storage/browser/${gs_scratch#*//}/imaging/cns_disk/?project=$project
+"
+  [[ $OPT_dry_run ]] && return
+
+  Say "Disk assembly completed. The current list of CNS snapshots is:"
+  jlist=$(_GetSnapshotList)
+  _PrintSnapshotList "$jlist"
+
+  (( $(jq <<<"$jlist" -r length) <= 2 )) ||
+    Say "Consider pruning older snapshots using" \
+        "'$(C c)$my0 prune [-n $(C y)<num>$(C c)]$(C)'"
+}
+
+#==============================================================================#
+
+CmdBuild() {
+  local argspec="\
+$my0 [<common-options>] build [<build-options>] [<command-args>...]
+
+Build software and assembly CNS disk image, ready for deployment.
+
+The build is controlled by the file lib/build/MillFile, and, if provided, user's
+override file etc/build/Millfile. By default, all artifacts are checked, those
+unavailable are built, and then a CNS disk image is created and labeled, unless
+an image with exactly same software manifest exists.
+
+The 'manifest' is just a list of software package IDs and their versions.
+
+Most commonly, you just invoke the build command without arguments. Everything
+else is considered advanced usage.
+
+Certain overrides are available with the command line. You can also build
+software completely independent of Millfile specs, using the $(C c bm-build) tool.
+The only case this is recommended is rebuilding builders, which provide build
+environments but produce no CNS artifacts directly, such as the cxx.
+--
+ Build command options:
+f,force       Force assembly, even if a snapshot with matching manifest exists.
+rebuild-all   Force a complete rebuild of everything. Rarely used; implies -f
+b,build-only  Do build, but stop before assembly.
+s,size=N      Target minimum disk size in GB. Default 35, minimum 20.
+
+$argp_common_options"
+
+  OPT_size=35
+  ArgParse -g2 "$argspec"
+  (( OPT_size >= 20 )) ||
+    Die "CNS disk size ${OPT_size}GB is too small, performance would degrade."
+
+  _Build
+  [[ $OPT_build_only ]] || _Assembly
+}
+
+#==============================================================================#
+# The tool entrypoint.
+#==============================================================================#
+
+argspec_top="\
+$my0 [<common-options>] <command> [<command-options>] [<command-args>...]
+$my0 <command> --help  # Get help on individual commands.
+
+Build, deploy and manage Common Node Software (CNS) images and disks.
+
+<command> is one of:
+  build   - Build software per Millfile spec and make a new CNS disk snapshot.
+  list    - List CNS snapshots and disks.
+  prune   - Remove older snapshots and/or unused CNS disks.
+  rmdisk  - Remove a CNS provisioned disk
+  rmsnap  - Remove a CNS snapshot
+  rollout - Replace current CNS disk in cluster with the specified one.
+
+The common options are accepted either before or after the command.
+All long options and command names can be shortened to an unambiguous prefix.
+--
+$argp_common_options"
+
+ArgParse -uc'build list prune rmdisk rmsnap rollout help' \
+         -d'list' "$argspec_top"
+
+verb=${POPT_ARGV-}
+unset POPT_ARGV[0]
+
+case $verb in
+  build)   CmdBuild      ;;
+  list)    CmdList       ;;
+  prune)   CmdPrune      ;;
+  rmdisk)  CmdRmDisk     ;;
+  rmsnap)  CmdRmSnapshot ;;
+  rollout) CmdRollout    ;;
+  *) Die "$my0:$LINENO:internal error:command verb case missing"
+esac
+exit 0
