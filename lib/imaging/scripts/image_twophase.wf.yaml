@@ -74,7 +74,7 @@ Steps:
   &20 start-boot-m:
     CreateInstances:
     - Name: boot-m
-      MachineType: e2-standard-1
+      MachineType: e2-medium
       NetworkInterfaces:
         &net
       - subnetwork: regions/${region}/subnetworks/service
