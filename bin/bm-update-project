@@ -650,7 +650,7 @@ run this tool a few times in a row, or sometimes without any reason at all."
               roles/logging.logWriter \
               roles/monitoring.metricWriter
   do
-    for acc in $acc_compute $acc_control $acc_manage; do
+    for acc in $acc_compute $acc_control $acc_manage $acz_imager; do
       _PrintBinding serviceAccount:$acc $role
     done
   done
@@ -829,7 +829,7 @@ _MakeOrSanityCheckBucket() {
   local bname    # Name of bucket burrmill_role=$brole; valid if $cnt=1.
   local bloc     # Location of same, also valid only for $cnt=1.
   local bsane=A  # Sanity indicator, see _BucketSanity.
-  local pname=${!gs_brole}   # Value of the project config gs_$brole.
+  local pname=${!gs_brole-}   # Value of the project config gs_$brole.
   local ploc=    # Location of bucket named by pname. Empty if not found.
   local prole=   # burrmill_role of bucket $pname. Empty is ambig, check ploc.
   local psane=A  # Sanity indicator, see _BucketSanity.
