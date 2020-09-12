@@ -23,20 +23,20 @@ readonly devname=${1:-filer}   # The device name used when attaching disk.
 readonly label=BURRMILL_FILER  # Filesystem label. Must match /etc/ftab.
 readonly mpoint=/srv/mill      # Mountpoint, matches /etc/{fstab,exports}.
 
-# man lsblk recommends to allow the udev queue settle. We can stop as soon as
-# the dev link for the disk appears. 5s should be plenty of time: The whole
+# man lsblk recommends to allow the udev queue to settle. We can stop as soon
+# as the dev link for the disk appears. 5s should be plenty of time: The whole
 # normal boot sequence takes about 5 seconds, lock stock and barrel. If the
 # queue does not settle within this time, then something is probably very wrong.
 udevadm settle --timeout=5 --exit-if-exists=/dev/disk/by-label/$label
 
 # Locate the disk by the name it was attached to the instance; GCE exposes it in
-# the 'serial number' field. The resulting array is either empty if the disk was
+# the 'serial number' field. The 'devspec' array is either empty if the disk was
 # not found, or has 5 elements:
 #  1 = filesystem label, if formatted, else '-'
 #  2 = mountpoint, or '-' if not mounted.
 #  3 = filesystem type ('ext4') or '-' if empty and has none.
 #  4 = device node file ('/dev/sdc'), always present.
-#  5 = size in GB; always present.
+#  5 = size rounded down to whole GB; always present.
 devspec=(
   $(lsblk --json --bytes --output=LABEL,MOUNTPOINT,FSTYPE,PATH,SIZE,SERIAL |
       jq -r --arg devname $devname \
@@ -44,7 +44,7 @@ devspec=(
                 | .size /= 1024*1024*1024 | .[] | . // "-"' ) )
 
 [[ ${devspec-} ]] ||
-  Fatal "No disk with device name '$devname' was not found."
+  Fatal "No disk with device name '$devname' was found."
 
 set -- "${devspec[@]}"
 
@@ -65,8 +65,8 @@ if [[ "$1$2$3" = "---" ]]; then
 
   # The size is used only to reserve enough block group descriptors for later
   # possible online resize; we always make the fs as large as the disk itself.
-  # The reservation will made for the smallest of (2*current size, 3TB).
-  (( size_gb < 1024 )) && size_gb=1024
+  # The reservation will be made for the smallest of (2*current size, 3TB).
+  (( size_gb < 1024 )) && size_gb=1024  # Again, this is not the fs size!
 
   mkfs.ext4 \
       -b4096 -I128 -i$((1024**2)) -j -Jsize=1024 -L$label -m0 -M$mpoint \
@@ -99,7 +99,7 @@ case $2 in
           "'$label' but is already mounted at '$2' (expecting '$mpoint')." ;;
 esac
 
-# Iff we have just created a new fs, pre-populate top-level directories.
+# Iff we've just created a new fs, pre-populate top-level directories.
 if [[ $new_fs ]]; then
   mkdir -p $mpoint/burrmill/{etc,data,home}
   chown -R user:burrmill $mpoint
