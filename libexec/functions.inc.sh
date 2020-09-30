@@ -68,9 +68,11 @@ C() {
   local c=${1:-}
   # Catch $(C something) if caller forgot the color.
   [[ $c && ! ${_term_csi[$c]:-} ]] &&
-    echo >&2 "${_term_csi[r]}${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}${_term_csi[-]}:invalid call to '$(C)', '$c' is not a color"
-  printf %s ${_term_csi[${c:--}]}
-  (( $# > 1 )) && { shift; printf %s%s "$*" ${_term_csi[-]}; } || true
+    printf >&2 "%s%s:%s%s:invalid call to '\$(%s)': '%s' is not a color\n" \
+               "${_term_csi[r]}" "${BASH_SOURCE[1]##*/}" \
+               "${BASH_LINENO[0]}" "${_term_csi[-]}" "$FUNCNAME" "$c"
+  printf %s "${_term_csi[${c:--}]-}"
+  (( $# > 1 )) && { shift; printf %s%s "$*" "${_term_csi[-]}"; } || true
 }
 
 # Similar syntax for grotty colors, used in groff tables, defined in tty.tmac.
@@ -84,9 +86,11 @@ Cr() {
   local c=${1:-}
   # Catch $(Cr something) if caller forgot the color.
   [[ $c && ! ${_groff_csi[$c]:-} ]] &&
-    echo >&2 "${_term_csi[r]}${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}${_term_csi[-]}:invalid call to '$(Cr)', '$c' is not a color"
-  printf '\\m[%s]' ${_groff_csi[${c:--}]}
-  (( $# > 1 )) && { shift; printf '%s\\m[%s]' "$*" ${_groff_csi[-]}; } || true
+    printf >&2 "%s%s:%s%s:invalid call to '\$(%s)': '%s' is not a color\n" \
+               "${_term_csi[r]}" "${BASH_SOURCE[1]##*/}" \
+               "${BASH_LINENO[0]}" "${_term_csi[-]}" "$FUNCNAME" "$c"
+  printf '\\m[%s]' "${_groff_csi[${c:--}]-}"
+  (( $# > 1 )) && { shift; printf '%s\\m[%s]' "$*" "${_groff_csi[-]}"; } || true
 }
 
 readonly OK="[${_term_csi[g]}OK${_term_csi[-]}]"
@@ -129,7 +133,9 @@ Confirm() {
   local def=n yn=
   case ${1-} in (-y) def=y yn="[$(C w Y)/n]"; shift;; (-n) shift;; esac
   : ${yn:="[y/$(C w N)]"}
-  (( $# == 0 )) && Die "$FUNCNAME:invalid call, missing arguments"
+  (( $# == 0 )) &&
+    Die "$FUNCNAME:called from ${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}:" \
+        "missing arguments"
   FlushStdin
   read -rp "$*$(C)"'? '$yn':' && [[ $REPLY = [Yy]* || ${REPLY:-$def} = [Yy]* ]]
 }
@@ -147,7 +153,9 @@ Pause() {
 SimpleMenu() {
   local eof_exits=y selection
   [[ ${1-} = -c ]] && { eof_exits=; shift; }
-  (( $# == 0 )) && Die "$FUNCNAME:invalid call, missing arguments"
+  (( $# == 0 )) &&
+    Die "$FUNCNAME:called from ${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}:" \
+        "missing arguments"
   local PS3="Enter your choice from 1 to ${#}"
   [[ $eof_exits ]] && PS3+=" (Ctrl+D to go back)"
   PS3+=": "
@@ -263,7 +271,9 @@ Usage () {
 
 # Wait upto 90s for ssh to accept connections to $1, exit with 1 if timed out.
 WaitForSsh() {
-  (( $# == 1 )) || Die "$FUNCNAME:$LINENO:invalid call, 1 argument required"
+  (( $# == 1 )) ||
+    Die "$FUNCNAME:called from ${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}:" \
+        "exactly 1 argument required"
   local vm=$1 rc=0
   Say "waiting for SSH shell becoming available on '$vm'"
   # Give it up to 90 (30x3) seconds to allow login. That's a lot.
