@@ -17,7 +17,7 @@
 # cost next to nothing, but less reliable and makes no sense. Cloud Functions
 # are regional, but not available in any region. Use 'gcloud functions regions
 # list' to get a current list. The following mapping is recommended based on the
-# current (2019) availability:
+# current (2020) availability:
 #
 #   us   => us-central1
 #   eu   => europe-west1
@@ -127,6 +127,8 @@ def _delete_untagged_images(project, location, gctoken):
   images=json.loads(resp.text)['child']
   delcount = 0
   for img in images:
+    if img == 'gcf':  # GCF images are stored here upon deployment. Ignore.
+      continue
     # Authorize with the 'push', R/W scope, since we are deleting images.
     auth = _authorize(img, 'push')
     resp = g_sess.get(f'https://{service}/v2/{project}/{img}/tags/list',
@@ -134,7 +136,7 @@ def _delete_untagged_images(project, location, gctoken):
     _check_2xx(resp)
     versions=json.loads(resp.text).get('manifest')
     if not versions:
-      _failed(resp, "No manifest was returned")
+      continue  # Maybe a deeper-nested image. We don't use them, GCP does.
 
     for sha, man in iter(versions.items()):
       if man['tag'] == []:  # Better be explicit than sorry.
