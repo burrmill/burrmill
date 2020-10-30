@@ -13,10 +13,10 @@ substitutions:
   #
   # Images for CUDA and MKL should already exist in the project's registry.
   # The _{MKL,CUDA}_VER here refer to the corresponding image tags.
-  _KALDI_VER:  '6f329a62e'
+  _KALDI_VER:  'e5cb693cd'
   _KALDI_REPO: git://github.com/kaldi-asr/kaldi.git
   _CUDA_VER:   '10.1.2'
-  _MKL_VER:    '2019.5'
+  _MKL_VER:    '2020.3'
 
 #++ Boilerplate
   _GS_LOCATION: $_GS_LOCATION
@@ -43,11 +43,14 @@ steps:
   entrypoint: /bin/bash
   args:
   - -c
-    # 1. This is one long folded YAML line, take care of semicolons.
-    # 2. GitHub server refuses to fetch a commit by its hash, clone whole thing.
-  - set -eux;
-    git clone --single-branch --branch=master --no-checkout $_KALDI_REPO kaldi;
-    git -C kaldi -c advice.detachedHead=false checkout $_KALDI_VER;
+  - |-
+    set -eux
+    git clone --no-checkout $_KALDI_REPO kaldi
+    git -C kaldi -c advice.detachedHead=false checkout $_KALDI_VER
+    # TODO(kkm): Pull new slurm.pl. Remove after #4314 is merged.
+    cd kaldi
+    git show origin/kkm/new-slurm.pl:egs/wsj/s5/utils/parallel/slurm.pl \
+                                    >egs/wsj/s5/utils/parallel/slurm.pl
 
   # Prefetch the CUDA image.
 - waitFor: [-]

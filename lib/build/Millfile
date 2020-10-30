@@ -77,7 +77,7 @@
 # You are likely to update it to a latest one. However, keeping it unchanged
 # during your whole experiment is a good idea.
 
-tar kaldi  6f329a62e  _KALDI_VER : cxx mkl cuda
+tar kaldi  e5cb693cd  _KALDI_VER : cxx mkl cuda
 
 # Do not simply upgrade Slurm because it's newer. Better open a feature request
 # at https://github.com/burrmill/burrmill/issues/new?template=fr-other.md
@@ -89,6 +89,7 @@ tar slurm 19.05.4-1 _SLURM_VER : cxx
 
 # The cxx is a builder, and it is unversioned. It will never be rebuilt by
 # Burrmill automatically. You'll maintain it. Read the docs on the cxx builder.
+# To rebuild it, run the lower-level utility: 'bm-build -s cxx'.
 # TODO(kkm): LINK: Add link to the decs when it's done (0.7-beta)
 
 builder cxx
@@ -97,7 +98,7 @@ builder cxx
 # optimized for the new CPUs, *if* they are offered in GCE and in your location.
 # Otherwise, it works, so don't fix it.
 
-image mkl  2019.5    _MKL_VER
+image mkl  2020.3    _MKL_VER
 
 # CUDA is more complex: It does not have a consistent versioning or a consistent
 # download location. How do I know that v10.1 Update 2 is actually the version

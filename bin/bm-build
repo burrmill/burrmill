@@ -43,7 +43,7 @@ Switches:
   -l   List a summary for the last $LIST_LIMIT builds. Accepts optional tag \
 argument
        to list only builds with that tag.
-  -s   Run build synchronously, pringing the build output to terminal.
+  -s   Run build synchronously, printing the build output to terminal.
   -n   Print the submit command, but do not run it.
   -v   Add verbose diagnostics.
 
