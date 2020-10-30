@@ -1113,7 +1113,7 @@ if [[ ! $funreg ]]; then
   # First deployment in a project often fails. Must be a bug.
   for attempt in y ''; do
     $GCLOUD functions deploy $funname --format=none \
-            --set-env-vars=VERSION_MARKER=$funver \
+            --set-env-vars=VERSION_MARKER=$funver --stage-bucket=$gs_scratch \
             --region=$funreg --no-allow-unauthenticated --trigger-topic=$topic \
             --source=$BURRMILL_LIB/functions/$funname --runtime=python37 \
             --memory=128MB  --max-instances=1 --service-account=$acz_backsvc &&
@@ -1129,18 +1129,20 @@ if [[ ! $funreg ]]; then
            "abort, as this service is not essential, but the problem must" \
            "be addressed"
       Pause; }
-  [[ $do_test ]] && sleep 10  # Let things settle on a successful deployment.
+  [[ $do_test ]] && sleep 20  # Let things settle on a successful deployment.
 fi
 
 if [[ $do_test ]]; then
   Say "Making a test call to function $(C c $funreg/$funname)"
-  for attempt in 1 2 ''; do
+  for attempt in {1..5} ''; do
     result=$($GCLOUD functions call $funname \
                      --region=$funreg --data='{}' --format='get(result)')
     [[ $result = OK ]] && break
-    # Retry test call in 5 seconds, up to 3 times. This fails for no reason too.
+    # Retry test call in 5 seconds, up to 6 times. This fails for no reason too.
     [[ $attempt ]] && sleep 5
+    printf '*'
   done
+  printf '\n'
   if [[ $result = OK ]]; then
     Say $OK "Function smoke test passed"
   else
@@ -1156,7 +1158,7 @@ fi
 unset allregions do_test funname funreg funplaces topic
 
 #==============================================================================#
-# Service accounts,
+# Instance guest attributes
 #==============================================================================#
 SayBold "Enabling instance guest attributes project-wide"
 
@@ -1239,7 +1241,7 @@ else
       # interactively, the '-c' switch. It prints two lines to stdout, like:
       #     Key now has comment 'comment is here'
       #     Enter new comment:
-      # and then exists because its input is /dev/null. We parse the first line.
+      # and then exits because its input is /dev/null. We parse the first line.
       # ssh-keygen exits with a non-zero code; this is expected.
       pcmt=$(ssh-keygen -c -f $keyfile </dev/null |
                head -1 | perl -lpe "s/^.*?'//;s/'$//") || true
@@ -1248,7 +1250,7 @@ else
       gsutil cp $keyfile.pub $gspubkey
       Say $OK "Recovered public key $pcmt"$'\n'"uploaded to $gspubkey"
     else
-      Say $OK "A public key is already in $gspubkey"
+      Say $OK "The host public key file is already in $gspubkey"
     fi
   else
     Say "Generating a new SSH host key pair"
