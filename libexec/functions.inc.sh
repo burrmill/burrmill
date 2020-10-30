@@ -307,6 +307,51 @@ CleanPath() {
 }
 
 #==============================================================================#
+# jq helpers
+#==============================================================================#
+
+# For compat testing with jq 1.5 and 1.6, set in environment. Note that the
+# release version of jq 1.6 has a bug that makes its startup noticeably slower,
+# because of an accodental O(n^2) run time of the 'builtins' module load.
+# Generally, the fewer times jq is invoked in a script, the better the speed;
+# it's load is slow but processing is very fast. Most distros pulled a pre-rel
+# future 1.6 from the master branch after the bug was fixed (and mind you, they
+# did not agree on the exact commit, so there are at least as many different
+# tools all distributed as "jq 1.6" as there are Linux distros. And all of these
+# are not even alpha releases. Happy compat testing! And please try to stick
+# with 1.5 if you can. The lack of release schedule and a dedicated design
+# mastermind (single or collegial, official or de-facto--nada) are the two most
+# pitiable point of the project. The language ideas are a rarity (pure function
+# both accepting and returning indeterminate number of data (in the sense pl. of
+# 'datum') are not uncommon; SQL is a prime example, but replacing SQL algebraic
+# structure with the functional composition ring is not something I've heard of
+# before.
+: ${JQ:=jq}
+
+# Jq [jq switches...] "$js" 'jq program'. Strips comments from the program,
+# also takes the JSON string as argument without the '<<<' repeating neatly
+# everywhere, and makes sure to use $JQ for future-proofing againts jq 1.6.
+Jq() {
+  # Sorry, the arguments are reshuffled in a little bit dense way:
+  #     | 2nd from end, JS | All but last 2, jq options | Last one, jq code.
+  local js="${@:(-2):1}"   opts=("${@:1:$(($#-2))}")    prog="${@:(-1):1}"
+
+  # Allow rudimentary comments. A ^\s*#, or \s{2,}# signify a comment, to EOL.
+  # Note the EOL comments require at least 2 spaces, since we're oblivious to
+  # syntax, and may strip part of string, for example.  Trim empty lines
+  # remaining after stripped comments, but leave original emply lines alone, so
+  # the decommented program is still retaining empty lines added by its author.
+  prog=$(perl <<<"$prog" -lne '
+    if (s/(^\s*|\s{2,})#.*$//g) { print unless /^\s*$/; } else { print; };')
+  Dbg2 "JQ=$JQ" $'is executing:\n'"$prog"
+  $JQ <<<"$js" "${opts[@]}" "$prog"
+}
+
+# Same as above, but only test the result, return success unless the program
+# evaluated to a false-ish value (false, null or empty).
+JqTest() { Jq -e "$@"  >/dev/null; }
+
+#==============================================================================#
 # Cloud functions.
 #==============================================================================#
 
@@ -401,10 +446,10 @@ GsPrintBuckets() {
     *) local jsb=$1
   esac
   [[ ${jsb:-} ]] || return 0
-  jq <<<"$jsb" -r 'to_entries[] |
-           [.key, (.value | (.Labels.burrmill_role?//"(none)",
-                             ."Location type",
-                             ."Location constraint")) ] | @tsv' |
+  "$JQ" <<<"$jsb" -r 'to_entries[] |
+              [.key, (.value | (.Labels.burrmill_role? // "(none)",
+                                ."Location type",
+                                ."Location constraint")) ] | @tsv' |
     format-table -H'<BUCKET NAME<BURRMILL ROLE<TYPE<LOCATION'
 }
 
@@ -437,48 +482,3 @@ GetProjectGsConfig() {
     Die "Runtime config record 'configs/burrmill/variables/globals'"\
         "is missing or incomplete"
 }
-
-#==============================================================================#
-# jq helpers
-#==============================================================================#
-
-# For compat testing with jq 1.5 and 1.6, set in environment. Note that the
-# release version of jq 1.6 has a bug that makes its startup noticeably slower,
-# because of an accodental O(n^2) run time of the 'builtins' module load.
-# Generally, the fewer times jq is invoked in a script, the better the speed;
-# it's load is slow but processing is very fast. Most distros pulled a pre-rel
-# future 1.6 from the master branch after the bug was fixed (and mind you, they
-# did not agree on the exact commit, so there are at least as many different
-# tools all distributed as "jq 1.6" as there are Linux distros. And all of these
-# are not even alpha releases. Happy compat testing! And please try to stick
-# with 1.5 if you can. The lack of release schedule and a dedicated design
-# mastermind (single or collegial, official or de-facto--nada) are the two most
-# pitiable point of the project. The language ideas are a rarity (pure function
-# both accepting and returning indeterminate number of data (in the sense pl. of
-# 'datum') are not uncommon; SQL is a prime example, but replacing SQL algebraic
-# structure with the functional composition ring is not something I've heard of
-# before.
-: ${JQ:=jq}
-
-# Jq [jq switches...] "$js" 'jq program'. Strips comments from the program,
-# also takes the JSON string as argument without the '<<<' repeating neatly
-# everywhere, and makes sure to use $JQ for future-proofing againts jq 1.6.
-Jq() {
-  # Sorry, the arguments are reshuffled in a little bit dense way:
-  #     | 2nd from end, JS | All but last 2, jq options | Last one, jq code.
-  local js="${@:(-2):1}"   opts=("${@:1:$(($#-2))}")    prog="${@:(-1):1}"
-
-  # Allow rudimentary comments. A ^\s*#, or \s{2,}# signify a comment, to EOL.
-  # Note the EOL comments require at least 2 spaces, since we're oblivious to
-  # syntax, and may strip part of string, for example.  Trim empty lines
-  # remaining after stripped comments, but leave original emply lines alone, so
-  # the decommented program is still retaining empty lines added by its author.
-  prog=$(perl <<<"$prog" -lne '
-    if (s/(^\s*|\s{2,})#.*$//g) { print unless /^\s*$/; } else { print; };')
-  Dbg2 "JQ=$JQ" $'is executing:\n'"$prog"
-  $JQ <<<"$js" "${opts[@]}" "$prog"
-}
-
-# Same as above, but only test the result, return success unless the program
-# evaluated to a false-ish value (false, null or empty).
-JqTest() { Jq -e "$@"  >/dev/null; }
