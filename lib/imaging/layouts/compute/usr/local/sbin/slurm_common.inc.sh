@@ -14,8 +14,13 @@ ExpandHostnames() {
 }
 
 # When a program is invoked by Slurm, stdout and stderr may be closed, so that
-# gcloud fails simply trying to output a harmless diagnostics or progress
-# messages. --verbosity=none --no-user-output-enabled are both essential.
+# programs fail simply trying to output a harmless diagnostics or progress
+# messages, and gcloud fails for no reason whatsoever.
+[[ -t 0 ]] || exec 0</dev/null
+[[ -t 1 ]] || exec 1>/dev/null
+[[ -t 2 ]] || exec 2>/dev/null
+
+
 GCI="gcloud -q --verbosity=none --no-user-output-enabled compute instances"
 
 project=$(MetadataOrDie 'project/project-id')  # String codename.
