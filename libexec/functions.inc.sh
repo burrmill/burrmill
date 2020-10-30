@@ -423,7 +423,9 @@ GsMakeBuckets() {
   # which cannot even be granted any more. More than one bucket may lurk in
   # the argument array, thus the loop to match out bucket names only.
   local buck; for buck; do
-    [[ $buck == gs://* ]] && ${GSUTIL:-gsutil} iam set <(echo '{}') $buck
+    [[ $buck == gs://* ]] &&
+      ${GSUTIL:-gsutil} iam set \
+                        "$BURRMILL_LIB/policy/empty.iampolicy.json" $buck
   done
 }
 

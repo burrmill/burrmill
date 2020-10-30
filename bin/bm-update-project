@@ -1051,7 +1051,7 @@ _ac_cloudbuild=${project_id}@cloudbuild.gserviceaccount.com
 if ! jq <<<"$jsbuckets" >/dev/null -e --arg b $gs_registry \
        '.[$b]."Bucket Policy Only enabled"'; then
   Say "Turning on uniform access policy on the registry bucket"
-  gsutil iam set <(echo '{}') $gs_registry
+  gsutil iam set "$BURRMILL_LIB/policy/empty.iampolicy.json" $gs_registry
   gsutil ubla set on $gs_registry
 fi
 
