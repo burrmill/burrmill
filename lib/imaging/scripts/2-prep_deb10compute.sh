@@ -4,11 +4,9 @@
 
 # TODO(kkm): This is not as user-customizable as it should have been.
 
-# Versions that we install:
-#kernel=5.3.0-0.bpo.2-amd64
-readonly kernel=4.19.0-8-amd64  # Latest 4.19. NVIDIA does not compile with 5.3!
-readonly nvidia_ver=418.87.01   # From the NVIDIA public bucket.
-readonly nvidia_bucket=gs://nvidia-drivers-us-public/tesla
+# Versions that we install, may be overridden in etc/imaging/user_vars.inc.sh
+nvidia_ver=418.87.01   # From the NVIDIA public bucket.
+nvidia_bucket=gs://nvidia-drivers-us-public/tesla
 
 # This script is setting up the default image for compute cluster. The idea is
 # that the image should mostly just work for compute nodes with a minimal
@@ -17,6 +15,9 @@ readonly nvidia_bucket=gs://nvidia-drivers-us-public/tesla
 # nodes should be bootstrapped from this image easily, too.
 #
 # TODO(kkm): We are not forwarding logs from these hosts, but we should.
+
+# Current kernel version.
+readonly kernel=$(uname -r)
 
 # dpkg flushes files and syncs the FS very often. 'force-unsafe-io' speeds up
 # the setup significantly. Also, a few config files in layouts (in /etc/default,
@@ -71,10 +72,7 @@ nvidia_installer=NVIDIA-Linux-x86_64-${nvidia_ver}.run
 mkdir $temp && mount -t tmpfs tmpfs $temp ||E
 gsutil -qq cp $nvidia_bucket/$nvidia_ver/$nvidia_installer $temp &
 
-# Massage packages meanwhile, and replace the kernel: Debian cloud kernel no
-# RTC, so we get a bad jitter when a VM is migrated. Replacing the kernel also
-# causes a GRUB update indirectly: we change GRUB defaults in the layouts, but
-# the bootloader must be updated one way or another. This does it.
+# Install packages meanwhile.
 
 Apt update ||E
 
@@ -93,9 +91,9 @@ Apt install --no-upgrade \
     libncurses5 libnss-systemd libnuma1 \
     libpath-tiny-perl libpython2.7 libreadline7 \
     libsgmls-perl libstdc++6 libtinfo5 libyajl2 \
-    linux-image-${kernel} linux-headers-${kernel} \
+    linux-headers-${kernel} \
     nfs-common nfs-kernel-server \
-    parted perl policykit-1 python3 python3-requests python3-yaml \
+    parted perl policykit-1 python3 python3-requests python3-yaml pigz \
     sox time tzdata vim zlib1g ${USER_APT_PACKAGES[@]-} ||E
 
 # Install git and less from buster-backports:
@@ -109,10 +107,18 @@ Apt install git/$BP less/$BP
 unset BP
 
 Apt purge --auto-remove --allow-remove-essential \
-    cron linux-image-$(uname -r) \
-    logrotate mawk rsyslog unattended-upgrades vim-tiny ||E
+    cron logrotate mawk rsyslog unattended-upgrades vim-tiny ||E
 
+# We do not want to upgrade kernel, since GCP images come with the latest one,
+# but if one gets released during the build, we'll end up without NVIDIA
+# drivers for it.
+apt-mark hold linux-image-${kernel} ||E
 Apt upgrade ||E
+apt-mark hold linux-image-${kernel} ||E
+
+# Make sure initramfs and grub are up-to-date.
+update-initramfs -ukall ||E
+update-grub2 ||E
 
 # Wait for driver download to finish before mucking with network.
 # '-n' gets the exit code of the completed background job, so we can E it.
@@ -139,17 +145,14 @@ rm /etc/resolv.conf
 ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 # Install NVIDIA drivers while the new networking is starting up.
-chmod +x $temp/$nvidia_installer
-
 # CPU-intensive compile, so be nice. Discard some unneeded parts, such as X
 # drivers, right away by directing the install to in-memory tempfs directories.
-nice -n2 $temp/$nvidia_installer \
-     --no-questions --ui=none --disable-nouveau --no-drm --dkms \
+nice -n2 bash $temp/$nvidia_installer \
+     --no-questions --no-backup --ui=none --disable-nouveau --no-drm --dkms \
      --kernel-name=$kernel \
      --no-install-libglvnd --no-glvnd-glx-client --no-glvnd-egl-client \
-     --x-prefix=$temp/x --x-sysconfig-path=$temp/s \
+     --no-opengl-files --x-prefix=$temp/x --x-sysconfig-path=$temp/s \
      --application-profile-path=$temp/a \
-     --opengl-libdir=lib/x86_64-linux-gnu \
      --log-file-name=$temp/nvidia-install.log ||E
 
 cat $temp/nvidia-install.log
