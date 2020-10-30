@@ -231,7 +231,8 @@ $argp_common_options"
       for src in $BURRMILL_ROOT/$prefix/imaging/layouts/*/; do
         dst=$n-$(basename $src)
         Say "Packaging layout '$(C c)$dst$(C)' from '$(C c)$src$(C)'"
-        tar ca${tarv}f layouts/$dst.tar.gz --owner=0 --group=0 --sort=name \
+        tar ca${tarv}f layouts/$dst.tar.gz --format=pax --sort=name \
+            --preserve-permissions --no-acls --no-xattrs --owner=0 --group=0 \
             --exclude='README*' --exclude='*/.gitignore' \
             -C "$src" . || return
         packed_any=y
