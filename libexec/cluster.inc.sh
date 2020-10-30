@@ -561,7 +561,7 @@ LoadAndValidateClusterState() {
 # BuildConfigRecord "$jsconf" builds a JSON config record, after validating
 # machine types specified, and selecting sensible defaults for those omitted.
 BuildConfigRecord() {
-  local _IsAvailable config_rec deftype descfile mtype zone
+  local _IsAvailable config_rec descfile mtype zone
   local jsconf=${1?}
 
   # Two parallel 4-element arrays, role/power names and machine names.
@@ -573,6 +573,12 @@ BuildConfigRecord() {
   [[ ${#mtype[@]} = 4 ]] ||
     Die "Invalid machine type in cluster definition file, likely with spaces" \
         "in it? Read types:${LF}$(C c)$(declare -p mtype)$(C)."
+
+  # Auto selection for low-power, unless set explicitly by the user:
+  # use e2-medium for the login node, n1-standard-1 for the filer, because
+  # of e2-medium maximum total disk limit of 3TB. User can override.
+  [[ "${mtype[0]}" = - ]] && mtype[0]=n1-standard-1 # Filer node.
+  [[ "${mtype[2]}" = - ]] && mtype[2]=e2-medium     # Login node.
 
   zone=$(Jq -r "$jsconf" '.zone')
 
@@ -590,18 +596,6 @@ BuildConfigRecord() {
       Die "'$(C c)$mtypename$(C)' machine type '$(C c)${mtype}$(C)' is not" \
           "available in zone '$(C c)$zone$(C)'"
   }
-
-  # Auto selection for low-power, unless set explicitly by the user.
-  if [[ ":${mtype[0]}:${mtype[2]}:" = *:-:* ]]; then
-    # Prefer e2-medium if available, 10% to price, but much more oomph.
-    deftype=e2-medium
-    _IsAvailable $deftype || deftype=g1-small
-    Say "Using machine type '$deftype' for low-power mode."
-    [[ "${mtype[0]}" = - ]] && mtype[0]=$deftype
-    [[ "${mtype[2]}" = - ]] && mtype[2]=$deftype
-  else
-    deftype=${mtype[1]}  # Used for deployment only, same for both.
-  fi
 
   # 2-argument form complains and calls Die.
   for i in {0..3}; do

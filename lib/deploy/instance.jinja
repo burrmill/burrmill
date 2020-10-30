@@ -3,32 +3,32 @@
 ##  Copyright 2020 Kirill 'kkm' Katsnelson
 ##
 ##  VM instance template. Instantiated by cluster.jinja.
-##======================================================================##
-{%- set PROJ = env['project']                                           %}
-{%- set CLUS = env['deployment']                                        %}
-{%- set SUBNET = properties['subnet']                                   %}
-{%- set ROLE = properties['role']                                       %}
-{%- set ZONE = properties['zone']                                       %}
-{%- set REGION = '-'.join(ZONE.split('-')[:2])                          %}
-{%- set CNS_DISK = properties['cns_disk']                               %}
-{%- set FILER_DISK = properties['filer_disk']                           %}
-{#-                                                                     #}
-{#-Map role to initial machine type; the default is 'e2-medium'.        #}
-{%- set _role_machine = {'control':'e2-highcpu-2'}                      %}
-{%- set MACHINE_TYPE = _role_machine.get(ROLE, 'e2-medium')             %}
-{#-                                                                     #}
-{#-Map role to account; the default is 'compute'.                       #}
-{%- set _role_account = {'control':'control', 'login':'manage'}         %}
-{%- set ACCOUNT = _role_account.get(ROLE, 'compute')                    %}
-{#-                                                                     #}
-{#-Roles that have permanent boot disks and prevent tearoff on upgrade. #}
-{%- set _role_permboot = {'login':True}                                 %}
-{%- set BOOT = _role_permboot.get(ROLE) or properties['with_boot_disk'] %}
-##======================================================================##
+##============================================================================##
+{%- set PROJ = env['project']                                                 %}
+{%- set CLUS = env['deployment']                                              %}
+{%- set SUBNET = properties['subnet']                                         %}
+{%- set ROLE = properties['role']                                             %}
+{%- set ZONE = properties['zone']                                             %}
+{%- set REGION = '-'.join(ZONE.split('-')[:2])                                %}
+{%- set CNS_DISK = properties['cns_disk']                                     %}
+{%- set FILER_DISK = properties['filer_disk']                                 %}
+{#-                                                                           #}
+{#-Map role to initial machine type; the default is 'e2-medium'.              #}
+{%- set _role_machine = { 'control':'e2-highcpu-2', 'filer':'n1-standard-1' } %}
+{%- set MACHINE_TYPE = _role_machine.get(ROLE, 'e2-medium')                   %}
+{#-                                                                           #}
+{#-Map role to account; the default is 'compute'.                             #}
+{%- set _role_account = {'control':'control', 'login':'manage'}               %}
+{%- set ACCOUNT = _role_account.get(ROLE, 'compute')                          %}
+{#-                                                                           #}
+{#-Roles that have permanent boot disks and prevent tearoff on upgrade.       #}
+{%- set _role_permboot = {'login':True}                                       %}
+{%- set BOOT = _role_permboot.get(ROLE) or properties['with_boot_disk']       %}
+##============================================================================##
 
 resources:
 
-##=== BOOT DISK (will be torn off and shredded if !BOOT) ===============##
+##=== BOOT DISK (will be torn off and shredded if !BOOT) =====================##
 {%- if BOOT %}
 - name: {{CLUS}}-boot-{{ROLE}}
   type: compute.v1.disks
@@ -47,7 +47,7 @@ resources:
       disposition: a
 {%- endif %}
 
-##=== VM INSTANCE ======================================================##
+##=== VM INSTANCE ============================================================##
 - name: {{CLUS}}-{{ROLE}}
   type: compute.v1.instance
   properties:

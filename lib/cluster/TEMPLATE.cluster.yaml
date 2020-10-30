@@ -61,6 +61,26 @@
 # automatically added. Also, 'State=CLOUD' is always set, even if you try to
 # specify it with a different value. Usually, you do not need to specify the
 # Slurm's DEFAULT pseudo-node, we create sensible setting automatically.
+#
+# A NOTE ABOUT LOW-POWER MODE
+# ===========================
+# If not configured otherwise, we use e2-medium machine for the login node and
+# n1-standard-1 for the filer. All shared CPU machines (f1-micro, g1-small, and
+# e2-{micro,small,medium} limit the amount of total disk storage connected to
+# an instance to 3TB. Filer disks often exceed this limit. You can use e2-medium
+# only on a small learning cluster, but the bandwidth of a 3TB pd-standard disk
+# is often not enough for more intensive computation work.
+#
+# You can specify machine selection for low power mode under the 'size:' key,
+# as 'filer_low:' and 'login-low:' subkeys. Syntax is same as for 'filer:' and
+# 'login:'; simply name an instance type.
+#
+# A NOTE ABOUT HIGH-POWER MODE
+# ============================
+# The NFS server is essentially a huge RAM cache backed by a slow drive. The RAM
+# amount is the main player, but faster RAM access may also play a role. Tests
+# show that the N2D machines, AMD Rome CPU, provide the highest memoty bandwidth
+# for a buck. If you are scaling the filer up, consider using an N2D instance.
 
 ---
 name: ADD_CLUSTER_NAME
@@ -69,8 +89,11 @@ backup: NO         # TODO(kkm): Still undecided. Do not touch yet.
 # The default sizing is "M" (https://100d.space/p/burrmill/609##3nfspreset).
 size:
   shared_disk: 1280
-  filer: e2-highmem-8
+  filer: e2-highmem-4
   login: e2-standard-2
+  # Optional, default values. e2-medium is a good alternative for a filer<=2TB.
+  #filer_low: n1-standard-1
+  #login_low: e2-medium
 
 # The node definitions contribute to both slurm.conf and the GCE flag files
 # corresponding to each node type. Make very sure that the CPU counts match.
