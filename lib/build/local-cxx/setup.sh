@@ -55,6 +55,19 @@ dpkg_deps=(
 kaldi_deps=(
 )
 
+# KenLM
+kenlm_deps=(
+  libboost-program-options-dev
+  libboost-system-dev
+  libboost-test-dev
+  libboost-thread-dev
+  libeigen3-dev
+)
+
+srilm_deps=(
+  liblbfgs-dev
+)
+
 # Slurm.
 slurm_deps=(
   libcurl4-nss-dev
@@ -68,7 +81,6 @@ slurm_deps=(
   libreadline-dev
   zlib1g-dev
 )
-###libmysqlclient.so.20
 
 # sdagent, makes a deb artifact. We do not buid it atm.
 sdagent_deps=(
@@ -92,6 +104,8 @@ all_deps=(
   ${common_deps[*]}
   ${user_deps[*]}
   ${kaldi_deps[*]}
+  ${srilm_deps[*]}
+  ${kenlm_deps[*]}
   ${slurm_deps[*]}
 # ${sdagent_deps[*]}
 # ${fluentbit_deps[*]}

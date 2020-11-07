@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+substitutions:
+  # KenLM is unversioned, use a 9-digit Git hash in lieu of the version.
+  _KENLM_REPO: git://github.com/kpu/kenlm
+  _KENLM_VER:  'd70e28403'
+
+# The boilerplate part is same for all our cloudbuild.yaml files. Just keep it
+# this way. Your substitution variables go immediately before it, and
+# environment variables, if you want to propagate any to every build step, go
+# immediately after. Be careful: no '-' in the former part, but the '-' aligned
+# with the word 'env:' in the latter!
+
+#++ Boilerplate
+  _GS_LOCATION: $_GS_LOCATION
+  _GS_SCRATCH:  $_GS_SCRATCH
+  _GS_SOFTWARE: $_GS_SOFTWARE
+
+logsBucket: $_GS_SCRATCH/cloudbuild/logs
+options:
+  logging: GCS_ONLY
+  env:
+  - _GS_LOCATION=$_GS_LOCATION
+  - _GS_SCRATCH=$_GS_SCRATCH
+  - _GS_SOFTWARE=$_GS_SOFTWARE
+#-- Boilerplate
+
+tags: [kenlm]
+
+steps:
+- name: gcr.io/cloud-builders/git
+  entrypoint: /bin/bash
+  args:
+  - -c
+  - |-
+    set -eux
+    git clone --no-checkout $_KENLM_REPO kenlm
+    git -C kenlm -c advice.detachedHead=false checkout $_KENLM_VER
+
+- name: $_GS_LOCATION.gcr.io/$PROJECT_ID/cxx
+  args: [ ./build_kenlm.sh ]
+
+- name: gcr.io/cloud-builders/gsutil
+  entrypoint: /bin/bash
+  args:
+  - -xc
+  - gsutil -m $(cat GS_METADATA) cp kenlm.tar.gz $_GS_SOFTWARE/tarballs/

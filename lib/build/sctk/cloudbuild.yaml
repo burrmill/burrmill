@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2020 Kirill 'kkm' Katsnelson
+
+substitutions:
+  # SCTK is versioned, but has no version tags, so we use a 9-digit Git hash in
+  # lieu of the version. The hashtag of the current version 2.4.11 is 20159b580
+  # at https://github.com/usnistgov/SCTK, the SCTK official distribution repo.
+  _SCTK_REPO:     git://github.com/usnistgov/SCTK
+  _SCTK_VER:      '20159b580' # Authoritative.
+  _SCTK_INFO_VER: '2.4.11'    # Informative, used as part of path and recorded.
+
+# The boilerplate part is same for all our cloudbuild.yaml files. Just keep it
+# this way. Your substitution variables go immediately before it, and
+# environment variables, if you want to propagate any to every build step, go
+# immediately after. Be careful: no '-' in the former part, but the '-' aligned
+# with the word 'env:' in the latter!
+
+#++ Boilerplate
+  _GS_LOCATION: $_GS_LOCATION
+  _GS_SCRATCH:  $_GS_SCRATCH
+  _GS_SOFTWARE: $_GS_SOFTWARE
+
+logsBucket: $_GS_SCRATCH/cloudbuild/logs
+options:
+  logging: GCS_ONLY
+  env:
+  - _GS_LOCATION=$_GS_LOCATION
+  - _GS_SCRATCH=$_GS_SCRATCH
+  - _GS_SOFTWARE=$_GS_SOFTWARE
+#-- Boilerplate
+  - _SCTK_INFO_VER=$_SCTK_INFO_VER
+
+tags: [sctk]
+
+steps:
+- name: gcr.io/cloud-builders/git
+  entrypoint: /bin/bash
+  args:
+  - -c
+  - |-
+    set -eux
+    git clone --no-checkout $_SCTK_REPO sctk
+    git -C sctk -c advice.detachedHead=false checkout $_SCTK_VER
+
+- name: $_GS_LOCATION.gcr.io/$PROJECT_ID/cxx
+  args: [ ./build_sctk.sh ]
+
+- name: gcr.io/cloud-builders/gsutil
+  entrypoint: /bin/bash
+  args:
+  - -xc
+  - gsutil -m $(cat GS_METADATA) cp sctk.tar.gz $_GS_SOFTWARE/tarballs/

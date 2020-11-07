@@ -36,4 +36,4 @@ skip srilm
 # To pin Kaldi to a specific SHA hash on the master branch, use this directive.
 # Note that we identify Kaldi revisions with a hash exactly 9 hex digit long.
 
-#ver kaldi feefoofaa
+#ver kaldi feefaaf00

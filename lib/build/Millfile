@@ -57,7 +57,7 @@
 #       Docker image tag (e.g. 'mkl:2019.4'. For the tarball, it is the version
 #       metadatum on the object named <name>.tar.gz. As a fallback, a tarball
 #       named <name>-<version>.tar.gz is also considered, as long as it does NOT
-#       have the the version metadatum. If this field is not provided, the tag
+#       have the version metadatum. If this field is not provided, the tag
 #       ':latest' is used for a Docker image. For a tarball, this is not
 #       well-defined, so do always version tarballs.
 #   4 = Not allowed if no version, optional (but recommended) if there is. This
@@ -73,9 +73,10 @@
 #   replace those from the 'substitutions' section in the cloudbuild.yaml file.
 
 
-# Note that this pins Kaldi to some version that I user in my experiments.
-# You are likely to update it to a latest one. However, keeping it unchanged
-# during your whole experiment is a good idea.
+# Note that this pins Kaldi to some version that we used in our experiments.
+# You are likely to override it with a later one in your etc/build/Millfile.
+# However, keeping it unchanged during your whole experiment is a good idea, to
+# eliminate one of many sources of uncertainty.
 
 tar kaldi  e5cb693cd  _KALDI_VER : cxx mkl cuda
 
@@ -87,10 +88,27 @@ tar kaldi  e5cb693cd  _KALDI_VER : cxx mkl cuda
 
 tar slurm 19.05.4-1 _SLURM_VER : cxx
 
+# We also supply some popular and almost necessary software on the CNS disk.
+# You can skip it if you want (with the 'skip' directive in _your_ Millfile in
+# etc/build, see below), but its size and build time are negligible anyway, so
+# probably do not bother. Just make sure the versions are current if you start
+# using it.
+#
+# Read notes on versioning at the start of cloudbuild.yaml file in each
+# corresponding directory. For some software, it is not trivial. When changing
+# the Git hash, do not forget to change the associated "human-readable" but
+# non-definitive version. bm-node-software will not show it, but it will be
+# prominent in the software directory under opt, and added to the tarball in GS
+# as a separate metadatum.
+
+tar sctk 20159b580 _SCTK_VER : cxx : _SCTK_INFO_VER=2.4.11
+
+tar kenlm d70e28403 _KENLM_VER : cxx
+
 # The cxx is a builder, and it is unversioned. It will never be rebuilt by
 # Burrmill automatically. You'll maintain it. Read the docs on the cxx builder.
 # To rebuild it, run the lower-level utility: 'bm-build -s cxx'.
-# TODO(kkm): LINK: Add link to the decs when it's done (0.7-beta)
+# TODO(kkm): LINK: Add link to the docs when it's done (0.7-beta)
 
 builder cxx
 
@@ -147,7 +165,8 @@ image cuda 10.1.2    _CUDA_VER  : :  # Line continues with space in next line.
 # extremal example, if you 'skip cxx', you won't be able to build practically
 # anything at all (and the build will be very angry at you!)
 #
-# The directive simply takes one or more targets to skip, like
+# The directive simply accepts one or more targets to skip, like this (but
+# starting at position 1 in the line!):
 #
 #   skip srilm sctk dotnet
 #
@@ -163,3 +182,8 @@ image cuda 10.1.2    _CUDA_VER  : :  # Line continues with space in next line.
 # to some revision. We recommend pinning Kaldi to a specific version during an
 # experiment, to make sure your results are not affected by changes in the code,
 # unless you need a fix for a specific bug.
+
+# If you think that some toolkit must be included with the CNS disk, open the
+# ticket at https://github.com/burrmill/burrmill/issues/new/choose, in the
+# corresponding category. Obviously, the software must be publicly available and
+# legal to compile and use.

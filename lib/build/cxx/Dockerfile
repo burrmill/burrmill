@@ -26,7 +26,12 @@ RUN set -x              &&    \
       g++-8                   \
       gcc-8                   \
       git                     \
+      libboost-program-options-dev\
+      libboost-system-dev     \
+      libboost-test-dev       \
+      libboost-thread-dev     \
       libcurl4-nss-dev        \
+      libeigen3-dev           \
       libhwloc-dev            \
       libjson-c-dev           \
       liblbfgs-dev            \
