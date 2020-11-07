@@ -129,7 +129,7 @@ RunDaisy() {
 
   # Make a temporary directory for all required files, delete on return.
   tempdir=$(mktemp -d)
-  trap "cd - >/dev/null ; rm -rf $tempdir" EXIT RETURN
+  trap "cd / ; rm -rf $tempdir" EXIT RETURN
   chmod 700 $tempdir  # We may need to store a sensitive credential there.
   cd $tempdir
 
