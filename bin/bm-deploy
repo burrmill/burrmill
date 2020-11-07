@@ -306,7 +306,7 @@ WriteSlurmConfig() (
   local slurmconf_metakey=${cluster}_slurm_config  # Metadatum key.
 
   local tempdir=$(mktemp -d)
-  trap "cd / ; rm -rf $tempdir" ERR EXIT
+  trap "rm -rf $tempdir" EXIT
 
   # Part 1: tarball required files, with PWD in BurrMill root.
   cd $BURRMILL_ROOT
@@ -314,12 +314,13 @@ WriteSlurmConfig() (
   local dirty= n real_rev
 
   if [[ $rev ]]; then
-    # Deploying from revision $rev. Find the latest commit that changed either
-    # conffile, or anything under lib/cluster.
-    real_rev=$(git log -1 --abbrev=9 --format=%h "$rev" -- $conffile $libdir)
+    # Deploying from revision $rev. Find the latest commit before $rev that
+    # changed either conffile, slurmbase, or any of lib/cluster/*.conf files.
+    real_rev=$(git log -1 --abbrev=9 --format=%h "$rev" -- \
+                   $conffile $slurmbase "$libdir/*.conf")
     Say "Deploying Slurm config from commit '$(C c)$real_rev$(C)', the latest" \
         "one at or after${LF}the revision '$(C c)$rev$(C)' that has changed" \
-        "'$(C c)$conffile$(C)' and/or some files in '$(C c)$libdir/$(C)':"
+        "'$(C c)$conffile$(C)' and/or certain files in '$(C c)$libdir/$(C)':"
     { echo
       git show --abbrev-commit --name-status --relative $real_rev
       echo; } >&2
@@ -330,8 +331,9 @@ WriteSlurmConfig() (
       Die "At least one of $conffile or $slurmbase does not exist at" \
           "the revision $real_rev"
 
-    # We are good to go transferring the files to the temp location.
-    git archive $real_rev -- $conffile $libdir
+    # We are good to go transferring the files to the temp location. *.conf
+    # files are optional.
+    git archive $real_rev -- $conffile $slurmbase "$libdir/*.conf"
   else
     real_rev=$(git log -1 --abbrev=9 --format=%h)
     Say "Deploying Slurm config from the work tree"
@@ -350,7 +352,7 @@ WriteSlurmConfig() (
 
     # Check for merge conflicts: cannot deploy files if they have the conflict
     # marks ('<<<<<' and friends).
-    n=$(git status --porcelain=1 -- $conffile $libdir |
+    n=$(git status --porcelain=1 -- $conffile $slurmbase "$libdir/*.conf" |
                       grep -cP '^(DD|AA|.U|U.)' || true)
     if (( $n != 0 )); then
       Say "Unresolved conflicts are found, '$(C c)git status$(C)'" \
@@ -360,11 +362,14 @@ WriteSlurmConfig() (
           "conflict marks, cannot deploy them."
     fi
 
-    n=$(git status --ignored --porcelain=1 -- $conffile $libdir | wc -l)
+    n=$(git status --ignored --porcelain=1 -- \
+            $conffile $slurmbase "$libdir/*.conf" | wc -l)
     if (( $n != 0 )); then
       Say "Some required files are dirty or not under source control." \
           "'$(C c)git status$(C)' summary follows:"
-      { echo; git status --ignored --long -- $conffile $libdir; echo; } >&2
+      { echo
+        git status --ignored --long -- $conffile $slurmbase "$libdir/*.conf"
+        echo; } >&2
       dirty=y
     fi
 
@@ -378,7 +383,7 @@ WriteSlurmConfig() (
     fi
 
     # Transfer current files to the temp directory.
-    tar c --exclude=.{,.} -- $conffile $libdir/
+    tar c --exclude=.{,.} -- $conffile $slurmbase $libdir/
   # End if [[ $rev ]]:
   fi > $tempdir/_temp.tar  # So we do not run the if in a subshell.
 
@@ -399,6 +404,7 @@ WriteSlurmConfig() (
   # Create config files archive
   mkdir nodeclass
 
+  # lib/ first, so that files in etc/ overwrite synonymous files in lib/.
   for conf in $libdir/*.conf $etcdir/*.conf; do
     [[ -f $conf ]] && envsubst <$conf >./${conf##*/}
   done
