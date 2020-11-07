@@ -53,11 +53,23 @@ UndocObtainCredentialMaybe() {
             --format='json(client_id,client_secret,refresh_token)' |
       $JQ  '.type="authorized_user"' > $token_file ) ||
     { rm -f $token_file
-      Die "Unable to obtain credentail for account $(C c)$acc"; }
+      Die "Unable to obtain credential for account $(C c)$acc"; }
 
   export GOOGLE_APPLICATION_CREDENTIALS=$(realpath $token_file)
 }
 
+# Return project's service region. This is simply the region where the subnet
+# named 'service' is located.
+GetServiceRegion() {
+  GetProjectGsConfig
+
+  # Do not die with -e to augment the error message to make it sensible.
+  local svcreg=$($GC networks subnets list --filter=name=service \
+                     --format='value(region)' --limit=1) || true
+  [[ $svcreg ]] || Die "Unable to locate your service subnetwork." \
+                       "Run $(C c bm-update-project), it may fix the issue."
+  echo $svcreg
+}
 
 # A standard way to run Daisy with a temporary directory, user credentials
 # extracted from gcloud, and the kitchen sink.
@@ -75,12 +87,10 @@ UndocObtainCredentialMaybe() {
 # Environment:
 #  $project is required.
 #  $OPT_debug, $OPT_dry_run, $OPT_yes are respected.
-#
-# The whole fuinction is set in a subshell, because it sets traps.
-RunDaisy() (
+RunDaisy() {
   set -eu
-  declare _Daisy opt scratch_path shopt_saved svcreg svczone tempdir wfname
-  declare op_cmd=true op_sss= op_wfv=
+  local _Daisy opt scratch_path shopt_saved svcreg svczone tempdir wfname
+  local op_cmd=true op_sss= op_wfv=
 
   OPTIND=1  # Must be reset, init is per-shell.
   while getopts "c:s:v:" opt; do
@@ -111,10 +121,7 @@ RunDaisy() (
   GetProjectGsConfig  # Idempotent, caches, ok to call multiple times.
 
   # Find the service subnet.
-  svcreg=$($GC networks subnets list --filter=name=service \
-               --format='value(region)' --limit=1)
-  [[ $svcreg ]] || Die "Unable to locate your service subnetwork." \
-                       "Run $(C c bm-update-project), it may fix the issue."
+  svcreg=$(GetServiceRegion)
   # Pick a random zone in the service net's region.
   svczone=$($GC zones list --filter="region=$svcreg AND status=UP" \
                 --format='value(name)' --limit=1)
@@ -122,7 +129,7 @@ RunDaisy() (
 
   # Make a temporary directory for all required files, delete on return.
   tempdir=$(mktemp -d)
-  trap "cd / ; rm -rf $tempdir" EXIT
+  trap "cd - >/dev/null ; rm -rf $tempdir" EXIT RETURN
   chmod 700 $tempdir  # We may need to store a sensitive credential there.
   cd $tempdir
 
@@ -178,4 +185,4 @@ RunDaisy() (
   # Invoke the daisy surrogate constructed above.
   _Daisy -project=${project?} -zone=$svczone -gcs_path=$scratch_path \
          -disable_cloud_logging ${op_wfv:+"-variables=$op_wfv"} $wfname.wf.json
-)
+}

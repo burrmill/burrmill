@@ -476,7 +476,9 @@ GetProjectGsConfig() {
   local permissive=
   [[ ${1-} = -p ]] && { permissive=y; shift; }
 
-  gs_location= gs_software= gs_scratch=
+  # May be called from a function, declare variables as global (4.2+).
+  declare -g gs_location= gs_software= gs_scratch=
+
   local confrec=$(RuntimeConfigVarGet burrmill globals) || true
   Dbg1 "Config var configs/burrmill/variables/globals='$confrec'"
   [[ $confrec ]] && export $confrec
