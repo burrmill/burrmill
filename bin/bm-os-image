@@ -231,8 +231,8 @@ $argp_common_options"
       for src in $BURRMILL_ROOT/$prefix/imaging/layouts/*/; do
         dst=$n-$(basename $src)
         Say "Packaging layout '$(C c)$dst$(C)' from '$(C c)$src$(C)'"
-        tar ca${tarv}f layouts/$dst.tar.gz --owner=0 --group=0 --sort=name \
-            --exclude='README*' --exclude='*/.gitignore' \
+        tar ca${tarv}f layouts/$dst.tar.gz --owner=0 --group=0 --mode=go-w \
+            --sort=name --exclude='README*' --exclude='*/.gitignore' \
             -C "$src" . || return
         packed_any=y
       done
@@ -255,8 +255,8 @@ $argp_common_options"
       dst=addons.tar.gz
       Say "Packaging '$(C c)$dst$(C)' from "\
           "$(C c)${add_dirs[1]}$(C) $(C c)${add_dirs[4]-}$(C)"
-        tar ca${tarv}f layouts/$dst --owner=0 --group=0 --sort=name \
-            --exclude='README*' --exclude='*/.gitignore' \
+      tar ca${tarv}f layouts/$dst --owner=0 --group=0 --mode=go-w \
+            --sort=name --exclude='README*' --exclude='*/.gitignore' \
             "${add_dirs[@]}" || return
     fi
   }
@@ -353,9 +353,9 @@ $argp_common_options"
     case $err in
       0) Say "The cluster is healthy, ok to proceed.";
          go=1  ;;
-      1|2) Error "Unspecific error, likely uncorrectable (e.g, " \
-                 "a non-exiting cluster)." ;;
-      8) Say "Despite this error, we'll likely recover from this state"
+      1|2) Error "Unspecific error, likely uncorrectable" \
+                 "(e.g, a non-exiting cluster)." ;;
+      8) Say "Despite this error, rollout will likely succeed"
          go=2 ;;
       *) Error "This tool is unlikely to recover from the error reported," \
                "use 'bm-deploy fix <cluster name> for the more thorough fix"
