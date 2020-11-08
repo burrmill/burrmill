@@ -10,7 +10,7 @@
 # GLOBAL:: cluster
 : ${cluster=}  # Set to empty if null.
 
-# Ubiquiously used. TODO: Do not add 'beta' when not in beta track.
+# Ubiquitously used. TODO: Do not add 'beta' when not in beta track.
 GDM="$GCLOUD beta deployment-manager"
 GDMD="$GDM deployments"
 
@@ -39,7 +39,7 @@ VerifyPrereqsAndGetCnsDisk() {
   filt='labels.burrmill:* AND labels.disklabel=burrmill_cns'
   # If specific snapshot was requested:
   [[ $cns_snapshot ]] && filt+=" AND name=$cns_snapshot"
-  # Find the (latest or the only matchin by name) snapshot.
+  # Find the (latest or the only matching by name) snapshot.
   cns_snapshot=$($GC snapshots list --format='json(name)' \
                      --sort-by=~creationTimestamp --limit=1   \
                      --filter="$filt" |
@@ -59,7 +59,7 @@ VerifyPrereqsAndGetCnsDisk() {
 # Return a list of deployments that are not obviously broken. For a thorough
 # check, there is LoadAndValidateClusterState. With -g, returns only those
 # which have no errors in the latest deployment status record. bm-power performs
-# a more thorough analysis, so the full JSON is returned without this swith.
+# a more thorough analysis, so the full JSON is returned without this switch.
 # For global operations like disk layouts, we do not do much checking, as a
 # reconfiguration alone may fix the discrepancies.
 #
@@ -91,24 +91,24 @@ GetLikelyUsableDeployments() {
 #
 # -eN = check and action level:
 #   -e0 = return the configured (or already present in $cluster) value. Use
-#         when the defaullt is likely to change, and reporting "you have no
+#         when the default is likely to change, and reporting "you have no
 #         default" won't alarm the user.
 #   -e1 = same, check if exists, error if not. This is a normal behavior for
 #         most cases where the user did not specify a default. We die with
 #         a hint how to fix, but not trying any fixes at all, except silently
 #         erasing the reference to a non-existent cluster, but iff the project
 #         has no clusters: then assume the user is doing a major reshuffle.
-#   -e2 = return configured, or set sefault to the only existing, or bail out
+#   -e2 = return configured, or set default to the only existing, or bail out
 #         and hint the way to select. This may be used only by programs adding/
 #         removing whole clusters, 'bm-deploy new' or 'mb-deploy remove'.
 #
 # Default is -e1. -e2 is used by 'bm-deploy new', -e0 by 'bm-power select'
 #
-# The postional argument names the cluster. If omitted, the global variable
+# The positional argument names the cluster. If omitted, the global variable
 # $cluster is used; if that is not set, an attempt is made to get the user's
 # default/preferred cluster; and if that not set, then this is an error.
 #
-# The funtion will not set the global cluster variable, however.
+# The function will not set the global cluster variable, however.
 GetAndCheckCluster() {
   local -i elevel=1
   local _EnsureCluster clist clus_var lcluster msg opt
@@ -122,7 +122,7 @@ GetAndCheckCluster() {
   lcluster=${1-${cluster-}}
   case $elevel in
     0|1|2) ;;
-    *) Die "$my0:$FUNCNAME:$LINENO:internal error::invalid argument -e'$elevel'"
+    *) Die "$my0:$FUNCNAME:$LINENO:internal error:invalid argument -e'$elevel'"
   esac
 
   : $(GetUserAccount)
@@ -199,19 +199,20 @@ GdmLatestManifest() {
 # Usage: GdmUd Phase  Deployment Properties
 # e.g.:  GdmUD 1      $cluster   with_boot_disk:false
 #
-# On Phase 1, the disassembly, some known components that are shared between
-# clusters are retried with abandon. Phase 2 is re-assembly, and must normally
-# complete successfully without retry.
+# On Phase 1, the disassembly, some components may be shared between and fail to
+# delete; in this case the DM request is retries with the delete policy set to
+# 'abandon' (and the new manifest, so that the disassembly goes on). Phase 2 is
+# re-assembly, and must complete successfully without such a retry.
 #
-# Do not update more properties than necessary! DM is kinda brittle when used
-# to modify many things at once.
+# Do not update more properties than necessary! DM is brittle when used to
+# modify many things at once. It's brittle in general, too.
 GdmUpdateDeployment() {
   local phase=${1?} clus=${2?} props=${3?}
   local latestmf
 
   # Perform the update. We are expected to fail on Phase 1 in some cases, so
   # we perform essentially same update (with the new manifest, again!), but
-  # with the abandon policy. Tha cases of vanished nodes, or the CNS disk
+  # with the abandon policy. The cases of vanished nodes, or the CNS disk
   # used by another cluster all fall into this category.
   $GDMD update --format=none --manifest-id=$(GdmLatestManifest $clus) \
         "--properties=$props" $clus && return
@@ -232,7 +233,7 @@ GdmUpdateDeployment() {
 # LoadAndValidateClusterState: get cluster state, validate consistency.
 #==============================================================================#
 #
-# This is a main workhorse behing assessing health of and selecting required
+# This is a main workhorse behind assessing health of and selecting required
 # repairs of cluster installations within the project.
 #
 # Some global variables, usually options of the using tools, are controlling the
@@ -375,8 +376,10 @@ LoadAndValidateClusterState() {
 
 # Readability of jq code: any pair of () [] {} not closing on the same line has
 # spaces on the inside (after opening, before closing one). When embracing a
-# single-line expression, there is no space on the inside of the pair. The first
-# line illustrates it: "map( " is multiline, ["co..", "..in"] is single-line.
+# single-line expression, conversely, put no space on the inside of the pair.
+# The first line illustrates it: "map( " is starting a multiline expression and
+# has a space, while ["co..", "..in"] is a single-line expression, and thus has
+# no spaces after the opening and before the closing braces.
 
   map( ["control", "filer", "login"] as $main_roles
      | ($main_roles + ["compute"]) as $known_roles
@@ -397,7 +400,7 @@ LoadAndValidateClusterState() {
 # .P containing only important, possibly preprocessed values.
      | . |= .P
 
-# .known if we can figure out by role; .main if one of the 3 prefedined main
+# .known if we can figure out by role; .main if one of the 3 predefined main
 # roles: control, filer or login. Non-powerable is checked on main nodes only,
 # and is in effect during the node power-transition. We can force-kill compute
 # nodes regardless of their power state.
@@ -413,8 +416,8 @@ LoadAndValidateClusterState() {
 #
 # My pet peeve with jqlang is the lack of official documentation on operation
 # precedence and associativity; the precedence is quite unobvious ("//" has a
-# lower precedence than the ">"; "x//1 > 0" is a nonsensical operaton
-# "x//(1 > 0)", i.e. x//false; write "(x//1) > 0" to get intended result!
+# lower precedence than the ">"; "x // 1 > 0" is a nonsensical operation
+# "x // (1 > 0)", i.e. x // false; write "(x // 1) > 0" to get intended result!
 # This is the LSP violation in its finest (or worst). But the ideas behind and
 # the power of the language are quite impressive. The practical execution is
 # wanting a better design, IMO.
@@ -442,13 +445,13 @@ LoadAndValidateClusterState() {
      | .pwrix = $pwrix
      | .pwrtext = ["N/A","UNK","LOW","HIGH"][$pwrix] )  # End map on line 1.
 
-# Contination of the theme. The power setting is _consistent_ if all nodes that
+# Continuation of the theme. The power setting is _consistent_ if all nodes that
 # define low/high distinction in their configs (.pwrix > 0) do have the same
 # power setting, and this setting is strictly > 1 (i.e., not "UNK").
    | ( (map(select(.main).pwrix | select(. > 0)) | unique) as $pxs
      | ($pxs | length <= 1) and ($pxs[0]//0) > 1 ) as $pwrconsistent
 
-# Now group stuff by various criteria. This is the group by cns disk. If we have
+# Now group stuff by various criteria. This is the group by CNS disk. If we have
 # more than one, the last CNS rollout was botched and needs fixing. Also replace
 # disk full URI with a short name. Hope no one will use regional and a zonal CNS
 # with the same name in a single deployment (we do not support regional CNS
@@ -486,7 +489,7 @@ LoadAndValidateClusterState() {
     _WarnX "Found unidentifiable (mislabeled?) nodes on the cluster network:" \
            "$(C c)$(Jq "$jsnodestate" '[.n_unknown[].name]|join(", ")')$(C)"
 
-  # Error exit 8 if --strict sent by bm-deploy, and some machines are on.
+  # Error exit 12 if --strict sent by bm-deploy, and some machines are on.
   if [[ ${OPT_strict-} ]] && JqTest "$jsnodestate" '
                    [.n_main[],.n_compute[]]|any(.status!="TERMINATED")'; then
     _DieX 12 "Cluster $(C c)$lcluster$(C) has powered-up nodes." \
@@ -515,8 +518,8 @@ LoadAndValidateClusterState() {
 
   # TODO(kkm): Check for missing boot disks. This is the state that pisses off
   # the DM the most. For some reason, when asked to detach and delete already
-  # detached and deleted disk, it complains that the disk is not
-  # attached. Weird, and needs a good workaround.
+  # detached and deleted disk, it complains that the disk is not attached.
+  # Weird, and needs a good workaround.
 
   # Check for missing CNS disk on nodes.
   JqTest "$jsnodestate" '.cns_null' &&
@@ -545,7 +548,7 @@ LoadAndValidateClusterState() {
            "'$(C c)$my0 low $lcluster$(C)' or${LF}'$(C c)$my0 high" \
            "$lcluster$(C)' next time will fix the discrepancy."
 
-  # We skip in in 3 cases: bm-power { show | kill | select }.
+  # We skip in 3 cases: bm-power { show | kill | select }.
   [[ $skip_pwr_check ]] || JqTest "$jsnodestate" '.powerable' ||
     Die "The cluster is in a state not accepting power control" \
         "commands.${LF}Use a heavy-handed command '$(C y)$my0 kill" \
@@ -586,7 +589,7 @@ BuildConfigRecord() {
   #    1-arg form reports error code only, silently.
   # _IsAvailable type roletype
   #    2-arg form Dies if type is unavailable; roletype is part of message.
-  local -A known_types=()  # Cached availalibility checks.
+  local -A known_types=()  # Cached availability checks.
   _IsAvailable() {
     local mtype=${1?} mtypename=${2-}
     [[ ${known_types["$mtype"]-} ]] || return 0
@@ -615,7 +618,7 @@ BuildConfigRecord() {
 #==============================================================================#
 # WriteClusterRuntimeConfing $cluster "$jsconfigrec".
 #==============================================================================#
-# Zone is additionallly written as a text value for the
+# Zone is additionally written as a text value for the
 # burrmill-ssh-ProxyCommand tool.
 WriteClusterRuntimeConfing() {
   local cfg=runtimeconfig-${1?} zone=$(Jq -r "${2?}" .zone)
