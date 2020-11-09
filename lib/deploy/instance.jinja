@@ -53,10 +53,12 @@ resources:
   properties:
     zone: {{ZONE}}
     machineType: zones/{{ZONE}}/machineTypes/{{MACHINE_TYPE}}
+{%- if BOOT %}
     shieldedInstanceConfig:
       enableIntegrityMonitoring: false
       enableSecureBoot: false
       enableVtpm: false
+{%- endif %}
 
     disks:
 
