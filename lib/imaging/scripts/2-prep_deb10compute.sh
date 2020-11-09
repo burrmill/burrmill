@@ -114,7 +114,7 @@ Apt purge --auto-remove --allow-remove-essential \
 # drivers for it.
 apt-mark hold linux-image-${kernel} ||E
 Apt upgrade ||E
-apt-mark hold linux-image-${kernel} ||E
+apt-mark unhold linux-image-${kernel} ||E
 
 # Make sure initramfs and grub are up-to-date.
 update-initramfs -ukall ||E
