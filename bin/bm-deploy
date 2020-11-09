@@ -99,9 +99,9 @@ ParseClusterConfig() {
 
   # Now drop all commented out partitions, yet leave commented out nodes: still
   # want to distinguish erroneously referenced nodes that do not exist at all
-  # from those that are only commented out. This eg should be handled gracefully
-  # by dropping t4 node class from partition, making the commenting out of node
-  # type a single source of truth.
+  # from those that are only commented out. This example should be handled
+  # gracefully by dropping t4 node class from partition, making the commenting
+  # out of node type a single source of truth:
   #
   # nodes:
   #   p100: ...
@@ -147,7 +147,7 @@ ParseClusterConfig() {
 
   # Find all node names that are in .pars.Nodes but not in .nodes, including the
   # commented-out ones. Make sure not to yell at the node wildcard "ALL". This
-  # produces a message "badnames" like 'partition x:[y]; partition w:[u,v]'
+  # sets $badnames to a message like 'partition x:[y]; partition w:[u,v]'
   #
   # jq tip: subtraction '-' of arrays is the set difference operation.
   badnames=$(Jq -r "$jdef" '
@@ -244,7 +244,7 @@ ParseClusterConfig() {
   echo "$jdef"
 }
 
-# This is for normal loading; fixup does not call this.
+# This is for normal loading; The fix subcommand doesn't call this.
 LoadClusterConfig() {
   local cname descfile jconf
   local cluster=${1?}
@@ -398,7 +398,7 @@ WriteSlurmConfig() (
   # If we were not lucky to be given a preparsed config, parse it now.
   [[ $jdef ]] || jdef=$(ParseClusterConfig $conffile)
 
-  # For envsubst:
+  # For the envsubst command:
   export CLUSTER=$cluster BURRMILL_SBIN=/usr/local/sbin
 
   # Create config files archive
@@ -486,7 +486,7 @@ RemoveCluster() {
     |all( (.type | match("^compute.+disks$")) and
             (.finalProperties | match("\\bdisklabel:\\s*burrmill_cns\\b")) or
           (.type | match("^compute.+resourcePolicies$")))'; then
-    # All resources are expected to fail if shared, so just abandon them.
+    # Any shared resource is expected to fail deletion, so just abandon them.
     Say "$(C w)Ignore the error above$(C). Some resources are shared between" \
         "deployments, repeating${LF}the delete request, this time"\
         "disconnecting them from the deployment."
@@ -575,7 +575,7 @@ Do not confirm the next question until the snapshot is fully completed
   if [[ $OPT_filer_snapshot = y ]]; then
     Die "Internal error, Should not end up here."
     #TODO(kkm): Make a snapshot of the filer disk here. Need name, thus the
-    # resource record; we load in in bm-power, so split off a function?
+    # resource record; we load it in bm-power. Split off a function?
   fi
 
   # Currently a function. We could use it in other places??
@@ -773,7 +773,7 @@ EOF
   Say "Deploying cluster $cluster. This may take up to 5 minutes."
   props="zone:$zone,filer_size:$disk_size,cns_disk:$cns_snapshot"
   props+=",ip_range:$newipcidr,backup:$backup"
-  # https://issuetracker.google.com/issues/149522850: bug in autorollback.
+  # https://issuetracker.google.com/issues/149522850: non-bug in autorollback.
   $GDMD create \
         --template=$BURRMILL_LIB/deploy/cluster.jinja \
         --labels=burrmill=1,cluster=$cluster,zone=$zone \
@@ -872,7 +872,12 @@ $argp_common_options"
 
   ArgParse -g2 -a0 -A1 "$argspec"
   set -- "${POPT_ARGV[@]}"
+
   cluster=${1:-$(GetAndCheckCluster)}  # Exits on error.
+  descfile="$BURRMILL_ETC/cluster/${cluster}.cluster.yaml"
+  [[ -f $descfile ]] ||
+    Die "Cluster definition file $(C y)$descfile$(C)${LF} was not found." \
+        "Did you misspell the cluster name on the command line?"
 
   Warn "The command may take up to 10 minutes to complete. It is very" \
        "important not${LF}to interrupt the progress of this command." \
@@ -1037,7 +1042,7 @@ $argp_common_options"
   jsdesired=$(LoadClusterConfig $cluster)
   zone=$(Jq -r "$jsdesired" .zone)
 
-  # Warn/disallow reconfiguratuion under power.
+  # Warn/disallow reconfiguration under power.
   powerstate=$(Jq -r "$jsactual" '.n_main|map(.status)|unique|join(":")')
   powerforce=
   if [[ $powerstate != TERMINATED ]]; then
