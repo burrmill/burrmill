@@ -63,7 +63,7 @@ $argp_common_options"
     Jq -r "$jlist" '.[] | [(.name,.family,.creationTimestamp)] | @tsv' |
       format-table -H'<IMAGE NAME<IMAGE FAMILY<CREATED (local)'
 
-    # Count out-of-family images, print notice if any.
+    # Count out-of-family images, print a notice if any has been found.
     count=$(Jq -r --arg fam $image_family_compute "$jlist" '
                map(select(.family != $fam)) | length')
     (( count > 0 )) &&
@@ -170,7 +170,7 @@ $argp_common_options"
 # includes, for example, are possible.
 #
 # The phase 1 script will warn if there are any other files except the numbered
-# layer archices and the addons.tar.gz, but this is not considered fatal.
+# layer archives and the addons.tar.gz, but this is not considered fatal.
 
 CmdBuild() {
   local argspec="\
@@ -224,8 +224,8 @@ $argp_common_options"
 
     mkdir layouts || return
 
-    [[ OPT_debug_1 ]] && tarv+=v
-    [[ OPT_debug_2 ]] && tarv+=vv
+    [[ $OPT_debug_1 ]] && tarv+=v
+    [[ $OPT_debug_2 ]] && tarv+=v
 
     for prefix in lib etc; do
       for src in $BURRMILL_ROOT/$prefix/imaging/layouts/*/; do
