@@ -12,7 +12,13 @@
 
 # Ubiquitously used. TODO: Do not add 'beta' when not in beta track.
 GDM="$GCLOUD beta deployment-manager"
-GDMD="$GDM deployments"
+
+# Print command with --debug=2.
+Gdmd() (
+  [[ $OPT_debug_2 ]] && set -x
+  $GDM deployments "$@"
+)
+GDMD=Gdmd
 
 #==============================================================================#
 # VerifyPrereqsAndGetCnsDisk
@@ -314,12 +320,12 @@ LoadAndValidateClusterState() {
   # Verify deployment declares a CNS disk. Losing it during an interrupted
   # rollout is really possible. Do not reparse YAML, just match a regex.
   JqTest "$jresource" '
-    any( (.type | match("^compute.+disk")) and
+    any( (.type | match("\\bcompute.+\\bdisks\\b")) and
          (.finalProperties | match("\\bdisklabel:\\s*burrmill_cns\\b")) )' ||
     _DieX 6 "Deployment record for '$(C c)$lcluster$(C)' has no CNS disk."
 
   JqTest "$jresource" '
-    any( (.type | match("^compute.+disk")) and
+    any( (.type | match("\\bcompute.+\\bdisks\\b")) and
          (.finalProperties | match("\\bdisklabel:\\s*burrmill_cns\\b")) and
          (..|.errors? != null) )' &&
     _DieX 6 "Deployment record for '$(C c)$lcluster$(C)' CNS disk" \
@@ -330,7 +336,7 @@ LoadAndValidateClusterState() {
   . as $dot
 # $bd is an array of expected disks, each name synthesized from VM names,
 # like "qw-control" => "qw-boot-control".
-  | map( select(.type | match("^compute\\..+\\.instances?$"))
+  | map( select(.type | match("\\bcompute.+\\binstances?$"))
          | (.name |split("-") | "\(.[0])-boot-\(.[-1])") ) as $bd
 
   | $dot | map(.name | select(. == $bd[]))  # These are disk present in record.
@@ -341,7 +347,7 @@ LoadAndValidateClusterState() {
 
   # Verify that disks have no errors.
   JqTest "$jresource" '
-    any( (.type | match("^compute\\..+\\.disks$")) and
+    any( (.type | match("\\bcompute.+\\bdisks$")) and
          (.name | match("-boot-")) and
          (..|.errors? != null) )' &&
     _DieX 8 "Deployment record for '$(C c)$lcluster$(C)' has boot disk errors"
@@ -352,7 +358,7 @@ LoadAndValidateClusterState() {
 
   # Cluster subnet full URI.
   subnet=$(Jq -r "$jresource" \
-              '.[] | select(.type | match("^compute.+subnetwork"))
+              '.[] | select(.type | match("\\bcompute\\b.+\\bsubnetworks\\b"))
                  | .url | split("/")[-4:] | join("/")')
   [[ $subnet ]] ||
     _DieX 10 "Deployment record for '$(C c)$lcluster$(C)' has no subnet."
