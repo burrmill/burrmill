@@ -131,6 +131,8 @@ GetAndCheckCluster() {
     *) Die "$my0:$FUNCNAME:$LINENO:internal error:invalid argument -e'$elevel'"
   esac
 
+  Say "Reading cluster configuration in project '$(C c)$project$(C)'..."
+
   : $(GetUserAccount)
   clus_var=users/${_//@/-at-}/cluster
 
@@ -151,7 +153,9 @@ GetAndCheckCluster() {
   # are none whatsoever: they apparently just removed their default one.
   if [[ ! ${clist-} ]]; then
     RuntimeConfigVarUnset burrmill $clus_var || true
-    Die "The project '$(C c)$project$(C)' has no deployed clusters."
+    Die "The project '$(C c $project)' has no successfully deployed" \
+        "clusters.${LF}Check for broken deployments with the " \
+        "'$(C c)bm-deploy ls$(C)' command"
   fi
 
   case $elevel in
@@ -187,8 +191,8 @@ GetAndCheckCluster() {
   # of no default separately; so there is at least 1 cluster in the project
   # and $lcluster may be either null or set to existing cluster or not.
   IsIn "${lcluster-}" ${clist[@]} ||
-    Die "Default cluster '$(C c)$lcluster$(C)' does not exist, but there are" \
-        "some others. Use '$(C c)bm-power select$(C)'"
+    Die "Default cluster '$(C c)$lcluster$(C)' does not exist, but multiple" \
+        "other do. Run '$(C c)bm-power select$(C)'"
 
   echo "$lcluster"
 }
@@ -303,8 +307,7 @@ LoadAndValidateClusterState() {
 
   # This message is not silenced; generally, only warnings and errors are,
   # to avoid confusing the user.
-  Say "Reading deployment record of cluster '$(C c)$lcluster$(C)'" \
-      "in project '$(C c)$project$(C)'..."
+  Say "Reading deployment record of cluster '$(C c)$lcluster$(C)'"
 
   # This stuff is messy. An array of objects each with normal properties .type
   # (e.g., 'compute.v1.instance', but can be 'compute.v1beta2.instance'); .name,
@@ -316,6 +319,8 @@ LoadAndValidateClusterState() {
         "does not appear to exist."
   Dbg1 "Loaded DM resource manifest for '$lcluster'"
   Dbg2 "$jresource"
+
+  Say "Validating state of cluster '$(C c)$lcluster$(C)'"
 
   # Verify deployment declares a CNS disk. Losing it during an interrupted
   # rollout is really possible. Do not reparse YAML, just match a regex.

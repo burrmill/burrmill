@@ -572,6 +572,8 @@ Do not confirm the next question until the snapshot is fully completed
             "project '$(C c $project)'" ||
     exit 1
 
+  trap '' INT
+
   if [[ $OPT_filer_snapshot = y ]]; then
     Die "Internal error, Should not end up here."
     #TODO(kkm): Make a snapshot of the filer disk here. Need name, thus the
@@ -761,11 +763,12 @@ Login node low-power machine  . . $(C c)$(Jq -r "$jscfgrec" .power.login[0])$(C)
 EOF
   [[ $OPT_yes ]] ||
     Confirm -y "Is this a configuration you want to proceed with" ||
-    exit 2
+    exit 1
 
   slurmconf=${cluster}_slurm_config  # Mirror WriteSlurmConfig naming.
   trap "set +e; echo >&2 Removing Slurm configuration from project; set -x;
         $GC project-info remove-metadata --keys=$slurmconf 2>/dev/null" ERR EXIT
+  trap '' INT
 
   Say "Writing Slurm configuration to project metadatum $slurmconf"
   WriteSlurmConfig -j "$jsconf" $cluster
@@ -821,8 +824,10 @@ EOF
   done
 
   if [[ $OPT_poweroff && $warninigs ]]; then
+    trap - INT
     Say "You requested --poweroff, but there were warnings reported above."
     Confirm -n "Do you still want to power off the cluster" || OPT_poweroff=
+    trap '' INT
   fi
   if [[ $OPT_poweroff ]]; then
     Say "Requesting poweroff of the newly deployed cluster with" \
@@ -888,6 +893,8 @@ $argp_common_options"
 
   [[ $OPT_yes ]] ||
     Confirm "Begin the recovery of cluster '$(C c)$cluster$(C)'" || exit 0
+
+  trap '' INT  # Ignore Ctrl+C
 
   set +e  # We do not rely on -e here, as we handle normally fatal errors.
   Say "If you see any messages with the [$(C r ERROR)] mark, ignore them."
@@ -1017,9 +1024,10 @@ A recommended workflow is:
 This way you guarantee that a good commit ID to return back to exists in Git,
 and the commit is replicated at least one remote server for safekeeping.
 --
-r,revision=R         Deploy from git revision R. Default is the worktree.
-s,slurm-only         Only update Slurm config (a bit faster).
-f,force              Update Slurm configuration even if dirty (uncommitted)
+r,revision=R         Deploy Slurm config from Git revision R, not the worktree.
+s,slurm-only         Only update Slurm config.
+m,machine-only       Only update low/high power login/filer machine types.
+f,force              Update Slurm configuration even if dirty (uncommitted).
 only-if-missing*     (hidden) Used by bm-deploy fix command only. Implies -f.
 
 $argp_common_options"
@@ -1032,6 +1040,12 @@ $argp_common_options"
 
   ArgParse -g2 -a0 -A1 "$argspec"
   set -- "${POPT_ARGV[@]}"
+
+  [[ $OPT_slurm_only && $OPT_machine_only ]] &&
+    Die "Options --machine-only and --slurm-only are incompatible"
+  [[ $OPT_revision && $OPT_machine_only ]] &&
+    Die "The --revision option makes no sense with --machine-only"
+
   cluster=${1:-$(GetAndCheckCluster)}
 
   # Verify that the cluster has been deployed, and is offline.
@@ -1044,6 +1058,20 @@ $argp_common_options"
 
   # Warn/disallow reconfiguration under power.
   powerstate=$(Jq -r "$jsactual" '.n_main|map(.status)|unique|join(":")')
+  [[ $powerstate = TERMINATED ]] &&
+    Warn "Cluster has powered-on nodes"
+
+  if [[ ! $OPT_slurm_only ]]; then
+    SayBold "Checking/updating runtime configuration record"
+    WriteClusterRuntimeConfing $cluster "$(BuildConfigRecord "$jsdesired")"
+    Say "The changes, if any, will only take effect the next time the" \
+        "cluster${LF}is powered on with the" \
+        "'$(C c)bm-power$(C) [ $(C y low) | $(C y high) ]' command, with" \
+        "the low/high${LF}power specified explicitly."
+  fi
+
+  [[ $OPT_machine_only ]] && return
+
   powerforce=
   if [[ $powerstate != TERMINATED ]]; then
     if [[ $OPT_force ]]; then
@@ -1105,11 +1133,6 @@ $argp_common_options"
       $GCI disks resize $fdisk_uri --size=${fdisk_desired}GB
     fi
   fi
-
-  SayBold "Checking/updating runtime configuration record$(C)${LF}If there" \
-          "are changes, use '$(C c)bm-power$(C) [ $(C y)low$(C) |" \
-          "$(C y)high$(C) ]' next time when powering the cluster on"
-  WriteClusterRuntimeConfing $cluster "$(BuildConfigRecord "$jsdesired")"
 }
 
 #==============================================================================#
@@ -1145,11 +1168,11 @@ Deploy, remove, list, configure and resuscitate BurrMill clusters.
 '$my0 new' is the last of the four bootstrap steps to a working BurrMill rig.
 
 <command> is one of:
-  new     - Deploy, check consistency of, or repair a cluster deployment.
-  remove  - Remove a deployed cluster.
-  fix     - Try to fix a deployment. [Not implemented]
-  list    - List deployed clusters.
-  config  - Update cluster and/or Slurm configs.
+  new        - Deploy a new cluster from a definition file.
+  remove|rm  - Remove a deployed cluster.
+  fix        - Fix a deployment.
+  list|ls    - List deployed clusters.
+  config     - Update cluster and/or Slurm configs.
 
 The common options are accepted either before or after the command.
 All long options and command names can be shortened to an unambiguous prefix.

@@ -38,18 +38,34 @@ strict*              hidden: Make some warnings errors. Only used by bm-deploy.
 #==============================================================================#
 
 _PowerClusterOn() {
-  : ${cluster?} ${jsnodestate?}  # Assert variables set.
-  local async= to_start
-  to_start=($(Jq -r "$jsnodestate" \
-      '(.pwr_level != "LOW") as $nlo
-       | .n_main[] | select(.status == "TERMINATED" and
-                            ($nlo or .role != "control")).selfLink'))
+  : ${cluster?} ${jsnodestate?} ${OPT_control?}  # Assert variables set.
+  local async= control pwr_level to_start
+
+  # 'HIGH', 'LOW' or 'MIXED'.
+  pwr_level=$(Jq -r "$jsnodestate" '.pwr_level')
+  Dbg1 "Read power level '$pwr_level'; OPT_control='$OPT_control'"
+
+  # Turn on controller unless --no-control or --control omitted and pwr=LOW.
+  case $OPT_control.$pwr_level in
+    .* | x.LOW) control=false;;  *) control=true;;
+  esac
+  Dbg1 "Need control ON? '$control'"
+
+  to_start=($(Jq -r --argjson ctrl_on "$control" "$jsnodestate" \
+        '.n_main[] | select(.status == "TERMINATED" and
+                             ($ctrl_on or .role != "control")).selfLink'))
+
+  # If MIXED, a warning has been issued.
+  case $pwr_level in
+    LOW|HIGH) Say "Cluster '$(C c $cluster)' power level is $(C g $pwr_level)"
+  esac
+
+  [[ $OPT_control.$pwr_level = x.LOW ]] &&
+    Say "The control node is not started by default in the LOW power state"
+
   if [[ ! ${to_start-} ]]; then
-    Say "Cluster is already powered $(C g ON)"
+    Say "Cluster '$(C c)$cluster$(C)' is already powered $(C g ON)"
   else
-    JqTest "$jsnodestate" '.pwr_level == "LOW"' &&
-      Say "The controller is not being started because the power mode" \
-          "is set to $(C c LOW)."
     Say "Starting nodes: $(C c)${to_start[@]##*/}$(C)"
     # Listing of GCE operations reported with --async is uninformative.
     [[ $OPT_wait ]] || async='--async --no-user-output-enabled'
@@ -65,8 +81,11 @@ $my0 [<common-options>] on [<options>] [<cluster>]
 
 Turn main cluster nodes on. Use your default cluster if <cluster> is omitted.
 --
+ The 'on' command options:
+c,control            Turn on control node. --no-control to override default.
 $argp_common_options"
 
+  OPT_control='x'
   ArgParse -g2 -a0 -A1 "$argspec"
   set -- "${POPT_ARGV[@]}"
 
@@ -86,6 +105,7 @@ _CmdLowHighImpl() {
   local lohi=('LOW' 'HIGH')       # Indexable by $pwrix.
   local pwr_level=${lohi[$pwrix]} # LOW or HIGH.
 
+  OPT_control='x'
   ArgParse -g2 -a0 -A1 "${2?}"
   set -- "${POPT_ARGV[@]}"
 
@@ -102,7 +122,7 @@ _CmdLowHighImpl() {
     Die "Cluster $(C c)$cluster$(C) must be powered off to change power level"
 
   # Figure out minimum required changes, as 3-tuples (name, new machine type,
-  # self-link) per tab-separated line. --argjson passes o or 1 as integers to
+  # self-link) per tab-separated line. --argjson passes 0 or 1 as integers to
   # the jq program; --arg would pass them as strings instead.
   changes=$(Jq -r --argjson pwrix $pwrix "$jsnodestate" '
     .config.power as $cfg
@@ -112,12 +132,12 @@ _CmdLowHighImpl() {
     | [.name, $newmach, .selfLink] | @tsv')
   if [[ ! $changes ]]; then
     Say "Cluster '$(C c)$cluster$(C)' is already in" \
-        "$(C c)${lohi[$pwrix]}$(C)-power state"
+        "${lohi[$pwrix],,}-power state"
   else
     Dbg1 $'Changes to apply:\n'"$changes"
     local name machtype uri
     while read -r name machtype uri; do
-      Say "Changing $(C c)$name$(C) machine type to $(C c)$machtype$(C)"
+      Say "Changing $(C c)$name$(C) machine type to $(C c)$machtype"
       $GCI set-machine-type $uri --machine-type=$machtype
     done <<<"$changes"
 
@@ -137,6 +157,8 @@ $my0 [<common-options>] low [<options>] [<cluster>]
 Configure and turn on main cluster nodes in low-power mode. The controller
 is not run. Use your default cluster if <cluster> is omitted.
 --
+ The 'low' command options:
+c,control            Also turn on control node.
 $argp_common_options"
 
   _CmdLowHighImpl 0 "$argspec"
@@ -149,6 +171,8 @@ $my0 [<common-options>] high [<options>] [<cluster>]
 Configure and turn on main cluster nodes in high-power mode, ready to run
 the computation. Use your default cluster if <cluster> is omitted.
 --
+ The 'high' command options:
+c,control*           Turn on control node (default, --no-control to override).
 $argp_common_options"
 
   _CmdLowHighImpl 1 "$argspec"
@@ -302,7 +326,7 @@ $argp_common_options"
   local to_stop=($(Jq -r "$jsnodestate" '
                     .n_main[] | select(.status != "TERMINATED").selfLink'))
   [[ ! ${to_stop-} ]] &&
-    { Say "Cluster is already powered OFF"; return; }
+    { Say "Cluster '$(C c $cluster)' is already powered $(C g)OFF"; return; }
 
   Say "Stopping nodes: $(C c)${to_stop[@]##*/}$(C)"
   # Listing of GCE operations reported with --async is uninformative.
