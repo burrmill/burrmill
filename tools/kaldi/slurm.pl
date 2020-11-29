@@ -315,7 +315,20 @@ printenv | grep ^SLURM | sort | while read; do echo '#' "$REPLY"; done},
     qq{
 cat <<EOF_xeC9eg
 # $cmd
-EOF_xeC9eg}, q{
+EOF_xeC9eg},
+
+# Workaround for https://github.com/burrmill/burrmill/issues/17. Jobs randomly,
+# and very rarely, fail with exit code 127 and a message from the ld.so
+# "PROGNAME: error while loading shared libraries: libLIBNAME.so: cannot open
+# shared object file: No such file or directory" when loading from the CNS disk
+# (the /opt mount). This check limits the number of job restarts when the job
+# has genuinely exited with the code 127 on every retry. 70 is a pretty distinct
+# exit code, also meaningfully defined in BSD.
+    q{
+(( ${SLURM_RESTART_COUNT:-0} >= 4 )) && exit 70 },
+# End of workaround.
+
+    q{
 if [[ ${CUDA_VISIBLE_DEVICES-} = NoDevFiles ]]; then
   echo CUDA_VISIBLE_DEVICES set to NoDevFiles, unsetting.
   unset CUDA_VISIBLE_DEVICES

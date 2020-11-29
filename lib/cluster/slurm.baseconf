@@ -21,6 +21,13 @@ SlurmdPidFile=/run/slurm/slurmd.pid
 SlurmdSpoolDir=/var/spool/slurm
 LaunchParameters=slurmstepd_memlock_all
 
+# Workaround for https://github.com/burrmill/burrmill/issues/17. Jobs randomly,
+# and very rarely, fail with exit code 127 and a message from the ld.so
+# "PROGNAME: error while loading shared libraries: libLIBNAME.so: cannot open
+# shared object file: No such file or directory" when loading from the CNS disk
+# (the /opt mount). This setting tells Slurm to requeue such jobs.
+RequeueExit=127
+
 # Generalized node resources. Do not use name 'gpu' for GPU, to keep it simple:
 # we always have 1 GPU per node, and these nodes are identical. Slurm's plugin
 # gres_gpu gets in the way more than helps in such a simple setup.
