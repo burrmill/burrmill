@@ -109,6 +109,10 @@ unset BP
 Apt purge --auto-remove --allow-remove-essential \
     cron logrotate mawk rsyslog unattended-upgrades vim-tiny ||E
 
+# Recent Debian images come with this new package, which is not needed, as
+# resizing is handled by systemd-growfs@-. We do not ||E if it's missing.
+Apt purge --auto-remove gce-disk-expand
+
 # We do not want to upgrade kernel, since GCP images come with the latest one,
 # but if one gets released during the build, we'll end up without NVIDIA
 # drivers for it.

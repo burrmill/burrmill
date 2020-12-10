@@ -11,9 +11,8 @@
 
 [Unit]
 Description=Update environment and ld.so cache upon /opt mount
-Before=basic.target
+After=basic.target opt.mount
 BindsTo=opt.mount
-After=opt.mount
 
 # The service is a provider of BurrMill environment.
 Wants=burrmill-environment.target
