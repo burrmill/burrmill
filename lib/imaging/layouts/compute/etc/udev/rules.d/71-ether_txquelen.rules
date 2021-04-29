@@ -3,5 +3,5 @@
 # Ref: https://slurm.schedmd.com/high_throughput.html.
 # Increase ethernet txqueuelen from the default 1000 to 2500.
 
-ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[0-9]*|en[px][0-9]*", \
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[0-9]*|en[psx][0-9]*", \
   ATTR{tx_queue_len}="2500"
