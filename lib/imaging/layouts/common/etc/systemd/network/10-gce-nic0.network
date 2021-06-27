@@ -14,8 +14,8 @@ Description=nic0 interface
 DHCP=ipv4
 LLMNR=false
 # Essentially disable IPv6 because systemd #12504. Fix in commits 4eb086a38 and
-# 9f6e82e6e but not yet released. GCE does not support IPv6 anyway, and whether
-# IPv6LL will be useful when it does is unknown.
+# 9f6e82e6e has been released in v243. GCE does not support IPv6 anyway, and
+# whether IPv6LL will be useful when it does is unknown.
 LinkLocalAddressing=no
 
 [DHCP]
