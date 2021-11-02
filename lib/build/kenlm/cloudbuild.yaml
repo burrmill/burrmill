@@ -3,7 +3,7 @@
 
 substitutions:
   # KenLM is unversioned, use a 9-digit Git hash in lieu of the version.
-  _KENLM_REPO: git://github.com/kpu/kenlm
+  _KENLM_REPO: https://github.com/kpu/kenlm
   _KENLM_VER:  'd70e28403'
 
 # The boilerplate part is same for all our cloudbuild.yaml files. Just keep it

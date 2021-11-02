@@ -149,7 +149,7 @@ image cuda 10.1.2    _CUDA_VER  : :  # Line continues with space in next line.
 # instead of the SHA hash, but you need to tell the build that the repo that
 # is different: from declared by default.
 #
-#ver kaldi multiling-2 _KALDI_REPO=git://github.com/myown/kalgi.git
+#ver kaldi multiling-2 _KALDI_REPO=https://github.com/myown/kaldi.git
 #
 # Or you can simply pin Kaldi to a hash, using the default repository:
 #

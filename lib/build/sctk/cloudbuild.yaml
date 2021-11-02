@@ -5,7 +5,7 @@ substitutions:
   # SCTK is versioned, but has no version tags, so we use a 9-digit Git hash in
   # lieu of the version. The hashtag of the current version 2.4.11 is 20159b580
   # at https://github.com/usnistgov/SCTK, the SCTK official distribution repo.
-  _SCTK_REPO:     git://github.com/usnistgov/SCTK
+  _SCTK_REPO:     https://github.com/usnistgov/SCTK
   _SCTK_VER:      '20159b580' # Authoritative.
   _SCTK_INFO_VER: '2.4.11'    # Informative, used as part of path and recorded.
 

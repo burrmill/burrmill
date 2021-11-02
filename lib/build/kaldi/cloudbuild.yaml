@@ -14,7 +14,7 @@ substitutions:
   # Images for CUDA and MKL should already exist in the project's registry.
   # The _{MKL,CUDA}_VER here refer to the corresponding image tags.
   _KALDI_VER:  'e5cb693cd'
-  _KALDI_REPO: git://github.com/kaldi-asr/kaldi.git
+  _KALDI_REPO: https://github.com/kaldi-asr/kaldi.git
   _CUDA_VER:   '10.1.2'
   _MKL_VER:    '2020.3'
 

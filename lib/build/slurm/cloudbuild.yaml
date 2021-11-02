@@ -7,7 +7,7 @@
 substitutions:
   # Slurm version to fetch and install. Repo unikely need to change ever.
   _SLURM_VER:  '19.05.4-1'
-  _SLURM_REPO: git://github.com/SchedMD/slurm.git
+  _SLURM_REPO: https://github.com/SchedMD/slurm.git
 
 #++ Boilerplate
   _GS_LOCATION: $_GS_LOCATION

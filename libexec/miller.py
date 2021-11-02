@@ -345,7 +345,7 @@ def validate_nocolon(rec:TokenRecord, mintok) -> None:
 # separated by the ':'. We require a space after the ':', just to avoid
 # awkwardness like 'tar foo:_X=http://bar', in case the user forget the second
 # colon and we add '_X=http' as a dependency; and to prevent splitting e.g.
-# 'ver kaldi feef00faa _KALDI_REPO=git://myownrepo.git' on 'git://'. This
+# 'ver kaldi feef00faa _KALDI_REPO=https://myownrepo.git' on 'https://'. This
 # function shuffles all parts except for variable overrides in the 'ver' clause,
 # which remain monolithic tokens, as they are not syntactically distinct.
 def tokenize_line(rec: FileRecord) -> TokenRecord:
@@ -358,9 +358,9 @@ def tokenize_line(rec: FileRecord) -> TokenRecord:
   # There are up to 3 parts, and they are treated differently:
   #   1: Always a sequence of tokens, e.g. [tar kaldi abcde1234 _KALDI_VER]
   #   2: An unordered set of dependencies, e.g. {cxx cuda mkl}.
-  #   3: A mapping of unique variables to values e.g. {_KALDI_REPO: git://etc}
+  #   3: A mapping of unique variables to values e.g. {_KALDI_REPO: https://etc}
   # First token in line determines the semantics, but we'll deal with it later.
-  # e.g. [ver kaldi 1234abcde _KALDI_REPO=git://foo/kaldi.git] stays as is for
+  # e.g. [ver kaldi 1234abcde _KALDI_REPO=https://foo/kaldi.git] stays as is for
   # now, as we still do syntax only, and do not distinguish tokens.
   p1, p2, p3, *__ = parts + [[]]*2  # Don't blow up on a shorter list.
   return (fnl, (p1, frozenset(p2), parse_var_map(fnl, p3)))
