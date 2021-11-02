@@ -51,4 +51,7 @@ def GetFreshToken() -> str:
   "Get a fresh Bearer access token, good for about 60 minutes."
   ucr = _credstore.Load()
   _credstore.Refresh(ucr)
-  return ucr.access_token
+  try:
+    return ucr.access_token
+  except AttributeError:
+    return ucr.token

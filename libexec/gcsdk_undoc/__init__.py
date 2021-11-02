@@ -45,8 +45,13 @@ del _ExtendSyspath
 # But for now, just register these modules blindly. If it breaks, I'll fix it.
 def _RegisterGcsdkCredProviders():
   from googlecloudsdk.core.credentials import store
-  store.DevShellCredentialProvider().Register()
+  try:
+    # DevShellCredentialProvider() has been removed, no longer needed?
+    store.DevShellCredentialProvider().Register()
+  except AttributeError:
+    pass
   store.GceCredentialProvider().Register()
+
 
 _RegisterGcsdkCredProviders()
 del _RegisterGcsdkCredProviders
