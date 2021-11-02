@@ -16,12 +16,12 @@ tar srilm  1.7.3  _SRILM_VER : cxx
 # The above line tells two different things to two different, albeit closely
 # cooperating processes:
 # - Build: check if the tarball named srilm.tar.gz with the version
-#   metdatum equal to '1.7.3' exists. If it does not, invoke the command
+#   metadatum equal to '1.7.3' exists. If it does not, invoke the command
 #   (roughly) 'bm-build srilm _SRILM_VER=1.7.3' to build it.
 # - CNS disk assembly: take the file named srilm.tar.gz with the version
 #   metadatum equal to '1.7.3', and unpack and integrate it into the CNS disk
 #   (or fail, if the build returned successfully but failed to produced one).
-# The 'bm-cns-disk' performs both tasks, internally.
+# The 'bm-node-software' tool performs both tasks, internally.
 # Also note that to build any C/C++ code, you need the cxx buider, so this
 # directive must also declare this dependency.
 

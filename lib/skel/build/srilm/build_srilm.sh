@@ -119,7 +119,7 @@ mv etc opt
 # visible labels on GCP disks and snapshots. The only caveat is single-quote
 # versions that may parse as an integer or floating point number, as a quirk of
 # YAML syntax. This is not our case (1.7 could, but 1.7.1 cannot); but extra
-# single-quoting around the verion is never an error.
+# single-quoting around the version is never an error.
 echo "srilm: '$version'" > opt/srilm/.BMVERSION
 
 # And now we're ready to package the artifact. Everything currently in the
