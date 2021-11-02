@@ -9,6 +9,7 @@
 {%- set REGION = '-'.join(ZONE.split('-')[:2])                          %}
 {%- set IP_RANGE = properties['ip_range']                               %}
 {%- set FILER_SIZE = properties.get('filer_size') or 750                %}
+{%- set FILER_TYPE = properties.get('filer_type') or 'pd-standard'      %}
 {%- set CNS_DISK = properties['cns_disk']                               %}
 {%- set BACKUP = properties.get('backup')                               %}
 {%- set WITH_BOOT_DISK = properties.get('with_boot_disk')               %}
@@ -72,6 +73,7 @@ resources:
   type: compute.v1.disks
   properties:
     zone: {{ZONE}}
+    type: zones/{{ZONE}}/diskTypes/{{FILER_TYPE}}
     sizeGb: '{{FILER_SIZE}}'
 {%- if BACKUP  %}
     resourcePolicies: [ $(ref.burrmill-snapshot-semiweekly.selfLink) ]

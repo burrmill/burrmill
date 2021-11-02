@@ -37,9 +37,21 @@ properties:
     description: >-
       Filer disk size in GB. Default is 750, the smallest practical.
       The disk can be extended later (bypassing the DM; it gets angry if asked
-      to enlarge a disk), but can never be reduced later.
+      to enlarge a disk), but can never be reduced.
     type: integer
     default: 750
+    minimum: 750
+  filer_type:
+    description: >-
+      Filer disk type. Default is pd-standard. Currently also supported:
+      pd-ssd, pd-balanced, pd-extreme.
+    type: string
+    enum:
+    - pd-balanced
+    - pd-extreme
+    - pd-ssd
+    - pd-standard
+    default: pd-standard
   backup:
     description: >-
       Enable 8 last semiweekly backups of the filer disk. Default is false.

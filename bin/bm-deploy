@@ -742,6 +742,7 @@ $argp_common_options"
 
   # TODO(kkm): Add type validation checks on load for these.
   disk_size=$(Jq -r "$jsconf" '.size.shared_disk')
+  disk_type=$(Jq -r "$jsconf" '.size.shared_disk_type//"pd-standard"')
   backup=$(Jq -r "$jsconf" '.backup//false')
 
   # Present a summary, ask of confirmation unless -y is in effect.
@@ -752,6 +753,7 @@ Cluster name  . . . . . . . . . . $(C c)${cluster}$(C)
 Zone  . . . . . . . . . . . . . . $(C c)${zone}$(C)
 Common node software disk . . . . $(C c)${cns_snapshot}$(C)
 Shared NFS disk size  . . . . . . $(C c)${disk_size}$(C)GB
+Shared NFS disk type  . . . . . . $(C c)${disk_type}$(C)
 Periodic snapshot of NFS disk . . $(C c)${backup}$(C)
 NFS server  . . . . . . . . . . . $(C c)${cluster}-filer$(C)
 NFS server full power machine . . $(C c)$(Jq -r "$jscfgrec" .power.filer[1])$(C)
@@ -774,8 +776,8 @@ EOF
   WriteSlurmConfig -j "$jsconf" $cluster
 
   Say "Deploying cluster $cluster. This may take up to 5 minutes."
-  props="zone:$zone,filer_size:$disk_size,cns_disk:$cns_snapshot"
-  props+=",ip_range:$newipcidr,backup:$backup"
+  props="zone:$zone,filer_size:$disk_size,filer_type:$disk_type"
+  props+=",cns_disk:$cns_snapshot,ip_range:$newipcidr,backup:$backup"
   # https://issuetracker.google.com/issues/149522850: non-bug in autorollback.
   $GDMD create \
         --template=$BURRMILL_LIB/deploy/cluster.jinja \

@@ -89,6 +89,8 @@ backup: NO         # TODO(kkm): Still undecided. Do not touch yet.
 # The default sizing is "M" (https://100d.space/p/burrmill/609##3nfspreset).
 size:
   shared_disk: 1280
+  # Optional type; One of pd-standard (default), pd-balanced or pd-ssd.
+  #shared_disk_type: pd-standard
   filer: e2-highmem-4
   login: e2-standard-2
   # Optional, default values. e2-medium is a good alternative for a filer<=2TB.
